@@ -59,6 +59,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
+
 import java.security.InvalidParameterException;
 
 import org.jsoup.Jsoup;
@@ -66,14 +67,24 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 
+import org.ros.Topics;
+import org.ros.concurrent.CancellableLoop;
+import org.ros.message.MessageListener;
+import org.ros.namespace.GraphName;
+import org.ros.node.AbstractNodeMain;
+import org.ros.node.ConnectedNode;
+import org.ros.node.topic.Publisher;
+import org.ros.node.topic.Subscriber;
+
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.Relatrix;
 import com.neocoretechs.relatrix.Result;
+import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
 import com.neocoretechs.rocksack.Alias;
 import com.neocoretechs.relatrix.DuplicateKeyException;
 
-public class ModelRunner {
+public class ModelRunner extends AbstractNodeMain {
     // Batch-size used in prompt evaluation.
     private static int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
     public final static boolean DEBUG = false;
@@ -85,6 +96,9 @@ public class ModelRunner {
 	public static BufferedWriter outputStream = null;
 	public static PrintWriter output = null;
 	public static FileWriter fileWriter = null;
+	Llama model = null;
+	Sampler sampler = null;
+	Options options = null;
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -136,21 +150,7 @@ public class ModelRunner {
         if (options.systemPrompt() != null) {
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
         }
-        if(options.localNode() != null) {
-        	try {
-        		dbClient = new AsynchRelatrixClientTransaction(options.localNode(), options.remoteNode(), options.remotePort());
-        		xid = dbClient.getTransactionId();
-        		tensorAlias = new Alias("Tensors");
-        		try {
-        			if(dbClient.getAlias(tensorAlias).get() == null)
-        				dbClient.setRelativeAlias(tensorAlias);
-        		} catch(ExecutionException | InterruptedException ie) {}
-        		if(DEBUG)
-        			System.out.println("Relatrix transaction Id:"+xid);
-        	} catch(IOException ioe) {
-        		ioe.printStackTrace();
-        	}
-        }
+        
         int startPosition = 0;
         Scanner in = new Scanner(System.in);
         loop: while (true) {
@@ -228,10 +228,16 @@ public class ModelRunner {
                 		//System.out.println("Response from storage:"+result);
                 	//});
             } else {
-                if(dbClient != null && storeDb)
-                	dbClient.store(xid, System.currentTimeMillis(), userText, model.tokenizer().decode(responseTokens));//.thenAccept(result-> {
+                if(dbClient != null) {
+                	CompletableFuture<Relation> cf = dbClient.store(xid, System.currentTimeMillis(), userText, model.tokenizer().decode(responseTokens));//.thenAccept(result-> {
                 		//System.out.println("Response from storage:"+result);
                 	//});
+                	try {
+                		cf.get();
+        			} catch (InterruptedException | ExecutionException e) {
+    					e.printStackTrace();
+    				}
+                }
             }
             if (stopToken == null) {
                 System.err.println("Ran out of context length...");
@@ -408,8 +414,7 @@ public class ModelRunner {
     }
     
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
-                   float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo,
-                   String localNode, String remoteNode, int remotePort) {
+                   float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
 
         static final int DEFAULT_MAX_TOKENS = 512;
 
@@ -444,9 +449,6 @@ public class ModelRunner {
             out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
             out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
             out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
-            out.println("  --localNode <string>          local database client node");
-            out.println("  --remoteNode <string>         remote database client node");
-            out.println("  --remotePort <int>            remote database port");
             out.println("  --metadata                    write metadata file of <model file>.metadata");
             out.println();
             out.println("Examples:");
@@ -504,40 +506,108 @@ public class ModelRunner {
                             case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
                             case "--stream" -> stream = Boolean.parseBoolean(nextArg);
                             case "--echo" -> echo = Boolean.parseBoolean(nextArg);
-                            case "--localNode" -> localNode = nextArg;
-                            case "--remoteNode" -> remoteNode = nextArg;
-                            case "--remotePort" -> remotePort = Integer.parseInt(nextArg);
                             case "--metadata" -> DISPLAY_METADATA = true;
                             default -> require(false, "Unknown option: %s", optionName);
                         }
                     }
                 }
             }
-            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, stream, echo, localNode, remoteNode, remotePort);
+            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, stream, echo);
         }
     }
+    
+	@Override
+	public GraphName getDefaultNodeName() {
+		return GraphName.of("llm");
+	}
+	
+	@Override
+	public void onStart(final ConnectedNode connectedNode) {
+		try {
+			dbClient = connectedNode.getRelatrixClient();
+			xid = dbClient.getTransactionId();
+			tensorAlias = new Alias("Tensors");
+			try {
+				if(dbClient.getAlias(tensorAlias).get() == null)
+					dbClient.setRelativeAlias(tensorAlias);
+			} catch(ExecutionException | InterruptedException ie) {}
+			if(DEBUG)
+				System.out.println("Relatrix transaction Id:"+xid);
+		} catch(IOException ioe) {
+			ioe.printStackTrace();
+		}
+		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
+		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
+		if(ModelRunner.DISPLAY_METADATA) {
+			try {
+				ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
+				ModelRunner.outputStream = new BufferedWriter(fileWriter);
+				ModelRunner.output = new PrintWriter(outputStream);
+			} catch(IOException e) {
+				System.err.println("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
+			}
+		}
+		try {
+			model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
+			if(model == null)
+				model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
+		} catch(IOException e) {
+			System.err.println("Could not load model " + options.modelPath.toString()+e);
+			System.exit(1);
+		}
+		sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
+		//
+		// set up publisher
+		//final Log log = connectedNode.getLog();
+		final Publisher<rosgraph_msgs.Log> logpub =
+				connectedNode.newPublisher(Topics.ROSOUT, rosgraph_msgs.Log._TYPE);
+		Subscriber<rosgraph_msgs.Log> subslog = connectedNode.newSubscriber(Topics.ROSOUT, rosgraph_msgs.Log._TYPE);
+		//
+		// set up subscriber callback
+		//
+		subslog.addMessageListener(new MessageListener<rosgraph_msgs.Log>() {
+			@Override
+			public void onNewMessage(rosgraph_msgs.Log message) {
 
-    public static void main(String[] args) throws IOException {
-        Options options = Options.parseOptions(args);
-        if(ModelRunner.DISPLAY_METADATA) {
-        	try {
-        		ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
-        		ModelRunner.outputStream = new BufferedWriter(fileWriter);
-        		ModelRunner.output = new PrintWriter(outputStream);
-        	} catch (final IOException e) {
-        		System.err.println("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
-        	}
-        }
-        Llama model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
-        if(model == null)
-        	model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
-        Sampler sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
-        if (options.interactive()) {
-            runInteractive(model, sampler, options);
-        } else {
-            runInstructOnce(model, sampler, options);
-        }
-    }
+			}
+
+		});
+		/**
+		 * Main publishing loop. Essentially we are publishing the data in whatever state its in, using the
+		 * mutex appropriate to establish critical sections. A sleep follows each publication to keep the bus arbitrated
+		 * This CancellableLoop will be canceled automatically when the node shuts down
+		 */
+		connectedNode.executeCancellableLoop(new CancellableLoop() {
+			private int sequenceNumber;
+
+			@Override
+			protected void setup() {
+				sequenceNumber = 0;
+			}
+
+			@Override
+			protected void loop() throws InterruptedException {
+				//log.info(connectedNode.getName()+" "+sequenceNumber);		
+				std_msgs.Header imghead = connectedNode.getTopicMessageFactory().newFromType(std_msgs.Header._TYPE);
+				imghead.setSeq(sequenceNumber);
+				org.ros.message.Time tst = connectedNode.getCurrentTime();
+				imghead.setStamp(tst);
+				imghead.setFrameId(tst.toString());
+				rosgraph_msgs.Log logmess = logpub.newMessage();
+				logmess.setMsg("Sequence number:"+sequenceNumber);
+				logmess.setHeader(imghead);
+				logpub.publish(logmess);
+				sequenceNumber++;
+				if (options.interactive()) {
+					runInteractive(model, sampler, options);
+				} else {
+					runInstructOnce(model, sampler, options);
+				}
+				Thread.sleep(100);		
+			}
+		});
+	}
+
 }
 
 final class GGUF {
