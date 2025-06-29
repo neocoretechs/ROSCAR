@@ -52,6 +52,7 @@ import java.util.function.LongConsumer;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 import java.util.Random;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -69,6 +70,7 @@ import org.jsoup.select.Elements;
 
 import org.ros.Topics;
 import org.ros.concurrent.CancellableLoop;
+import org.ros.concurrent.CircularBlockingDeque;
 import org.ros.message.MessageListener;
 import org.ros.namespace.GraphName;
 import org.ros.node.AbstractNodeMain;
@@ -99,6 +101,12 @@ public class ModelRunner extends AbstractNodeMain {
 	Llama model = null;
 	Sampler sampler = null;
 	Options options = null;
+	public static final String SYSTEM_PROMPT = "/system-prompt";
+	public static final String USER_PROMPT = "/user-prompt";
+	public static final String ASSIST_PROMPT = "/assist-prompt";
+	public static final String LLM = "/model";
+	
+	public CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -538,6 +546,8 @@ public class ModelRunner extends AbstractNodeMain {
 		}
 		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
 		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
+		ChatFormatInterface chatFormat;
+
 		if(ModelRunner.DISPLAY_METADATA) {
 			try {
 				ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
@@ -556,22 +566,70 @@ public class ModelRunner extends AbstractNodeMain {
 			System.exit(1);
 		}
 		sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
+		// Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
+		if(ModelLoader.name.equals("mistral")) {
+			chatFormat = new MistralChatFormat(model.tokenizer());
+		} else {
+			if(ModelLoader.name.equals("llama")) {
+				chatFormat = new ChatFormat(model.tokenizer());
+			} else {
+				throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
+			}
+		}
 		//
-		// set up publisher
+		// Set up publisher
 		//final Log log = connectedNode.getLog();
-		final Publisher<rosgraph_msgs.Log> logpub =
-				connectedNode.newPublisher(Topics.ROSOUT, rosgraph_msgs.Log._TYPE);
-		Subscriber<rosgraph_msgs.Log> subslog = connectedNode.newSubscriber(Topics.ROSOUT, rosgraph_msgs.Log._TYPE);
+		final Publisher<std_msgs.String> pubmodel = connectedNode.newPublisher(LLM, std_msgs.String._TYPE);
+		// Subscribers
+		Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
+		Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
+		Subscriber<std_msgs.String> subsassist = connectedNode.newSubscriber(ASSIST_PROMPT, std_msgs.String._TYPE);
 		//
 		// set up subscriber callback
 		//
-		subslog.addMessageListener(new MessageListener<rosgraph_msgs.Log>() {
+		subsuser.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
-			public void onNewMessage(rosgraph_msgs.Log message) {
-
+			public void onNewMessage(std_msgs.String message) {
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = new ArrayList<>();
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
+		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        if(response.isPresent())
+		        	try {
+		        		messageQueue.addLastWait(response.get());
+		        	} catch(InterruptedException ie) {}
 			}
-
 		});
+		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
+			@Override
+			public void onNewMessage(std_msgs.String message) {
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = new ArrayList<>();
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
+		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        if(response.isPresent())
+		        	try {
+		        		messageQueue.addLastWait(response.get());
+        			} catch(InterruptedException ie) {}
+			}
+		});
+		subsassist.addMessageListener(new MessageListener<std_msgs.String>() {
+			@Override
+			public void onNewMessage(std_msgs.String message) {
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = new ArrayList<>();
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
+		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        if(response.isPresent())
+		        	try {
+		        		messageQueue.addLastWait(response.get());
+		        	} catch(InterruptedException ie) {}
+			}
+		});
+		
 		/**
 		 * Main publishing loop. Essentially we are publishing the data in whatever state its in, using the
 		 * mutex appropriate to establish critical sections. A sleep follows each publication to keep the bus arbitrated
@@ -588,24 +646,40 @@ public class ModelRunner extends AbstractNodeMain {
 			@Override
 			protected void loop() throws InterruptedException {
 				//log.info(connectedNode.getName()+" "+sequenceNumber);		
-				std_msgs.Header imghead = connectedNode.getTopicMessageFactory().newFromType(std_msgs.Header._TYPE);
-				imghead.setSeq(sequenceNumber);
-				org.ros.message.Time tst = connectedNode.getCurrentTime();
-				imghead.setStamp(tst);
-				imghead.setFrameId(tst.toString());
-				rosgraph_msgs.Log logmess = logpub.newMessage();
-				logmess.setMsg("Sequence number:"+sequenceNumber);
-				logmess.setHeader(imghead);
-				logpub.publish(logmess);
+				//std_msgs.Header imghead = connectedNode.getTopicMessageFactory().newFromType(std_msgs.Header._TYPE);
+				//imghead.setSeq(sequenceNumber);
+				//org.ros.message.Time tst = connectedNode.getCurrentTime();
+				//imghead.setStamp(tst);
+				//imghead.setFrameId(tst.toString());
+				// block until we have a message, take from head of queue
+				String responseData = messageQueue.takeFirstNotify();
+				std_msgs.String pubmess = pubmodel.newMessage();
+				pubmess.setData(responseData);
+				//pubmess.setHeader(imghead);
+				pubmodel.publish(pubmess);
 				sequenceNumber++;
-				if (options.interactive()) {
-					runInteractive(model, sampler, options);
-				} else {
-					runInstructOnce(model, sampler, options);
-				}
-				Thread.sleep(100);		
 			}
 		});
+	}
+
+	public static Optional<String> processMessage(Llama model, Options options, Sampler sampler, Llama.State state, ChatFormatInterface chatFormat, List<Integer> promptTokens ) {
+        Set<Integer> stopTokens = chatFormat.getStopTokens();
+        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
+            if (options.stream()) {
+                if (!model.tokenizer().isSpecialToken(token)) {
+                    System.out.print(model.tokenizer().decode(List.of(token)));
+                }
+            }
+        });
+        if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
+            responseTokens.removeLast();
+        }
+        String responseText = null;
+        if(!options.stream()) {
+            responseText = model.tokenizer().decode(responseTokens);
+            //System.out.println(responseText);
+        }
+        return Optional.ofNullable(responseText);
 	}
 
 }
