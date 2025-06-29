@@ -63,6 +63,8 @@ import java.util.stream.Stream;
 
 import java.security.InvalidParameterException;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -71,12 +73,16 @@ import org.jsoup.select.Elements;
 import org.ros.Topics;
 import org.ros.concurrent.CancellableLoop;
 import org.ros.concurrent.CircularBlockingDeque;
+import org.ros.concurrent.RetryingExecutorService;
 import org.ros.message.MessageListener;
 import org.ros.namespace.GraphName;
 import org.ros.node.AbstractNodeMain;
 import org.ros.node.ConnectedNode;
 import org.ros.node.topic.Publisher;
 import org.ros.node.topic.Subscriber;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.Relatrix;
@@ -87,6 +93,7 @@ import com.neocoretechs.rocksack.Alias;
 import com.neocoretechs.relatrix.DuplicateKeyException;
 
 public class ModelRunner extends AbstractNodeMain {
+	private static final Log log = LogFactory.getLog(ModelRunner.class);
     // Batch-size used in prompt evaluation.
     private static int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
     public final static boolean DEBUG = false;
@@ -101,9 +108,9 @@ public class ModelRunner extends AbstractNodeMain {
 	Llama model = null;
 	Sampler sampler = null;
 	Options options = null;
-	public static final String SYSTEM_PROMPT = "/system-prompt";
-	public static final String USER_PROMPT = "/user-prompt";
-	public static final String ASSIST_PROMPT = "/assist-prompt";
+	public static final String SYSTEM_PROMPT = "/system_prompt";
+	public static final String USER_PROMPT = "/user_prompt";
+	public static final String ASSIST_PROMPT = "/assist_prompt";
 	public static final String LLM = "/model";
 	
 	public CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
@@ -170,10 +177,10 @@ public class ModelRunner extends AbstractNodeMain {
                 case "/quit":
                 case "/exit": break loop;
                 case "/context": {
-                    System.out.printf("%d out of %d context tokens used (%d tokens remaining)%n",
+                    log.info(String.format("%d out of %d context tokens used (%d tokens remaining)%n",
                             conversationTokens.size(),
                             model.configuration().contextLength,
-                            model.configuration().contextLength - conversationTokens.size());
+                            model.configuration().contextLength - conversationTokens.size()));
                     continue;
                 }
             }
@@ -184,7 +191,7 @@ public class ModelRunner extends AbstractNodeMain {
             	if(result == null)
             		continue;
             	userText = result.text();
-            	System.out.println(userText);
+            	log.info(userText);
             } else {
             	if(userText.startsWith("/recalltime")) {
             		storeDb = false;
@@ -193,7 +200,7 @@ public class ModelRunner extends AbstractNodeMain {
             		if(s == null)
             			continue;
             		userText = s;
-                  	System.out.println(userText);
+                  	log.info(userText);
             	} else {
                   	if(userText.startsWith("/recallwords")) {
                   		storeDb = false;
@@ -202,7 +209,7 @@ public class ModelRunner extends AbstractNodeMain {
                 		if(s == null)
                 			continue;
                 		userText = s;
-                      	System.out.println(userText);
+                      	log.info(userText);
                   	}
             	}
             }
@@ -248,7 +255,7 @@ public class ModelRunner extends AbstractNodeMain {
                 }
             }
             if (stopToken == null) {
-                System.err.println("Ran out of context length...");
+                log.error("Ran out of context length...");
                 break;
             }
         }
@@ -264,7 +271,7 @@ public class ModelRunner extends AbstractNodeMain {
         		ModelRunner.outputStream.flush();
         		ModelRunner.output.close();
         	} catch (final IOException e) {
-        		System.err.println("Could not flush metadata file "+e);
+        		log.error("Could not flush metadata file "+e);
         	} finally {
         		try {
         			if (ModelRunner.outputStream != null) {
@@ -274,7 +281,7 @@ public class ModelRunner extends AbstractNodeMain {
         				ModelRunner.output.close();
         			}
         		} catch (final IOException e) {
-        			System.err.println("Failed to close file: "+e);
+        			log.error("Failed to close file: "+e);
         		}
         	}
         }
@@ -314,7 +321,7 @@ public class ModelRunner extends AbstractNodeMain {
         }
         if (!options.stream()) {
             String responseText = model.tokenizer().decode(responseTokens);
-            System.out.println(responseText);
+            log.info(responseText);
         }
     }
     /**
@@ -435,9 +442,9 @@ public class ModelRunner extends AbstractNodeMain {
 
         static void require(boolean condition, String messageFormat, Object... args) {
             if (!condition) {
-                System.out.println("ERROR " + messageFormat.formatted(args));
-                System.out.println();
-                printUsage(System.out);
+                log.error("ERROR " + messageFormat.formatted(args));
+                //System.out.println();
+                //printUsage(System.out);
                 System.exit(-1);
             }
         }
@@ -540,7 +547,7 @@ public class ModelRunner extends AbstractNodeMain {
 					dbClient.setRelativeAlias(tensorAlias);
 			} catch(ExecutionException | InterruptedException ie) {}
 			if(DEBUG)
-				System.out.println("Relatrix transaction Id:"+xid);
+				log.info("Relatrix transaction Id:"+xid);
 		} catch(IOException ioe) {
 			ioe.printStackTrace();
 		}
@@ -554,7 +561,7 @@ public class ModelRunner extends AbstractNodeMain {
 				ModelRunner.outputStream = new BufferedWriter(fileWriter);
 				ModelRunner.output = new PrintWriter(outputStream);
 			} catch(IOException e) {
-				System.err.println("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
+				log.error("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
 			}
 		}
 		try {
@@ -562,7 +569,7 @@ public class ModelRunner extends AbstractNodeMain {
 			if(model == null)
 				model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
 		} catch(IOException e) {
-			System.err.println("Could not load model " + options.modelPath.toString()+e);
+			log.error("Could not load model " + options.modelPath.toString()+e);
 			System.exit(1);
 		}
 		sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
@@ -595,10 +602,12 @@ public class ModelRunner extends AbstractNodeMain {
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent())
+		        if(response.isPresent()) {
+		        	log.info("Queueing from role USER:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
+		        }
 			}
 		});
 		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
@@ -609,10 +618,12 @@ public class ModelRunner extends AbstractNodeMain {
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent())
+		        if(response.isPresent()) {
+		        	log.info("Queueing from role SYSTEM:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
         			} catch(InterruptedException ie) {}
+		        }
 			}
 		});
 		subsassist.addMessageListener(new MessageListener<std_msgs.String>() {
@@ -623,10 +634,12 @@ public class ModelRunner extends AbstractNodeMain {
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent())
+		        if(response.isPresent()) {
+		        	log.info("Queueing from role ASSIST:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
+		        }
 			}
 		});
 		
@@ -656,6 +669,7 @@ public class ModelRunner extends AbstractNodeMain {
 				std_msgs.String pubmess = pubmodel.newMessage();
 				pubmess.setData(responseData);
 				//pubmess.setHeader(imghead);
+				log.info("Publishing "+responseData);
 				pubmodel.publish(pubmess);
 				sequenceNumber++;
 			}
@@ -664,27 +678,17 @@ public class ModelRunner extends AbstractNodeMain {
 
 	public static Optional<String> processMessage(Llama model, Options options, Sampler sampler, Llama.State state, ChatFormatInterface chatFormat, List<Integer> promptTokens ) {
         Set<Integer> stopTokens = chatFormat.getStopTokens();
-        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
-            if (options.stream()) {
-                if (!model.tokenizer().isSpecialToken(token)) {
-                    System.out.print(model.tokenizer().decode(List.of(token)));
-                }
-            }
-        });
+        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), null);
         if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
             responseTokens.removeLast();
         }
-        String responseText = null;
-        if(!options.stream()) {
-            responseText = model.tokenizer().decode(responseTokens);
-            //System.out.println(responseText);
-        }
-        return Optional.ofNullable(responseText);
+        return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
 
 }
 
 final class GGUF {
+	private static final Log log = LogFactory.getLog(GGUF.class);
     private static final int GGUF_MAGIC = 0x46554747;
     private static final int DEFAULT_ALIGNMENT = 32; // must be a power of 2
     private static final List<Integer> SUPPORTED_GGUF_VERSIONS = List.of(2, 3);
@@ -1052,6 +1056,7 @@ final class GGUF {
 }
 
 interface Timer extends AutoCloseable {
+	static final Log log = LogFactory.getLog(Timer.class);
     @Override
     void close(); // no Exception
 
@@ -1066,7 +1071,7 @@ interface Timer extends AutoCloseable {
             @Override
             public void close() {
                 long elapsedNanos = System.nanoTime() - startNanos;
-                System.err.println(label + ": "
+                log.error(label + ": "
                         + timeUnit.convert(elapsedNanos, TimeUnit.NANOSECONDS) + " "
                         + timeUnit.toChronoUnit().name().toLowerCase());
             }
@@ -1339,6 +1344,7 @@ final class ModelLoader {
 }
 
 record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights weights) {
+	private static final Log log = LogFactory.getLog(Llama.class);
     public State createNewState(int batchsize, int beginOfText) {
         State state = new State(configuration(), batchsize);
         state.latestToken = beginOfText; // was tokenizer.getSpecialTokens().get("<|begin_of_text|>");, now we get from ChatFormat.beginOfText() which does the same
@@ -1422,7 +1428,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
     }
 
     public static final class State {
-
+    	private static final Log log = LogFactory.getLog(State.class);
         // current wave of activations
         public final int batchsize;
         public final FloatTensor[] x; // activation at current time stamp (dim,)
@@ -1689,7 +1695,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
                     }
                 }
                 if (echo) {
-                    System.out.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens));
+                    log.info(String.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens)));
                 }
                 // Only compute logits on the very last batch.
                 boolean computeLogits = promptIndex + nTokens >= promptTokens.size();
@@ -1721,10 +1727,10 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
         long elapsedNanos = System.nanoTime() - startNanos;
         long promptNanos = startGen - startNanos;
         long genNanos = elapsedNanos - startGen + startNanos;
-        System.err.printf("%ncontext: %d/%d prompt: %.2f tokens/s (%d) generation: %.2f tokens/s (%d)%n",
+        log.info(String.format("%ncontext: %d/%d prompt: %.2f tokens/s (%d) generation: %.2f tokens/s (%d)%n",
                 startPosition + promptIndex + generatedTokens.size(), model.configuration().contextLength,
                 promptTokens.size() / (promptNanos / 1_000_000_000.0), promptTokens.size(),
-                generatedTokens.size() / (genNanos / 1_000_000_000.0), generatedTokens.size());
+                generatedTokens.size() / (genNanos / 1_000_000_000.0), generatedTokens.size()));
 
         return generatedTokens;
     }
@@ -2470,11 +2476,6 @@ abstract class FloatTensor implements Externalizable, Comparable {
     	float aNorm = (float) Math.sqrt(aNormAdder.sum());
     	float bNorm = (float) Math.sqrt(bNormAdder.sum());
     	return (dotProduct / (aNorm * bNorm));
-    }
-    
-    public void verify() {
-    	System.out.println("size:"+size());
-      	System.out.println("Verified via String of length:"+toString().length());
     }
     
     public String toString() {
@@ -3782,6 +3783,7 @@ final class CosineHash implements Serializable, Comparable {
  * 
  */
 final class HashTable implements Serializable {
+	private static final Log log = LogFactory.getLog(HashTable.class);
 	private static final long serialVersionUID = -5410017645908038641L;
 	private static boolean DEBUG = true;
 	private static int radius = 500;
@@ -3831,7 +3833,7 @@ final class HashTable implements Serializable {
 	public List<FloatTensor> query(FloatTensor query) {
 		Integer combinedHash = hash(query);
 		if(DEBUG)
-			System.out.println("Combined hash for query:"+combinedHash);
+			log.info("Combined hash for query:"+combinedHash);
 		if(hashTable.containsKey(combinedHash))
 			return hashTable.get(combinedHash);
 		else
@@ -3907,6 +3909,7 @@ final class HashTable implements Serializable {
  * @author Jonathan Groff Copyright (C) NeoCoreTechs 2025
  */
 final class RelatrixLSH implements Serializable, Comparable {
+	private static final Log log = LogFactory.getLog(RelatrixLSH.class);
 	private static final long serialVersionUID = -5410017645908038641L;
 	private static boolean DEBUG = true;
 	public static final int VECTOR_DIMENSION = 50;
@@ -3972,7 +3975,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), query);
 			if(DEBUG)
-				System.out.println("Querying combined hash for query "+i+" of "+hashTable.size()+":"+combinedHash);
+				log.info("Querying combined hash for query "+i+" of "+hashTable.size()+":"+combinedHash);
 			Iterator<?> it = relatrix.findSet(combinedHash, '?', '?');
 			int cnt = 0;
 			while(it.hasNext()) {
@@ -3992,10 +3995,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 		}
 		long tims = System.currentTimeMillis();
 		if(DEBUG)
-			System.out.println("Querying combined hash for table of "+hashTable.size());
+			log.info("Querying combined hash for table of "+hashTable.size());
 		res = relatrix.findSetParallel(iq, '?', '?');
 		if(DEBUG)
-			System.out.println((System.currentTimeMillis()-tims)+" ms.");
+			log.info((System.currentTimeMillis()-tims)+" ms.");
 		return res;
 	}
 
@@ -4014,7 +4017,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 			try {
 				relatrix.store(combinedHash, word, vector);
 			} catch (DuplicateKeyException e) {
-				System.out.println("duplicate key:"+combinedHash+" for "+word);
+				log.error("duplicate key:"+combinedHash+" for "+word);
 			}
 		}
 	}
