@@ -86,6 +86,7 @@ import org.apache.commons.logging.LogFactory;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.Relatrix;
+import com.neocoretechs.relatrix.RelatrixTransaction;
 import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
@@ -98,7 +99,8 @@ public class ModelRunner extends AbstractNodeMain {
     private static int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
     public final static boolean DEBUG = false;
     public static boolean DISPLAY_METADATA = false;
-    public static AsynchRelatrixClientTransaction dbClient = null;
+    //public static AsynchRelatrixClientTransaction dbClient = null;
+    static RelatrixTransaction dbClient = null;
     public static TransactionId xid = null;
     public static Alias tensorAlias = null;
     // metadata dump
@@ -238,20 +240,20 @@ public class ModelRunner extends AbstractNodeMain {
             if (!options.stream()) {
                 String responseText = model.tokenizer().decode(responseTokens);
                 System.out.println(responseText);
-                if(dbClient != null && storeDb)
-                	dbClient.store(xid, System.currentTimeMillis(), userText, responseText);//.thenAccept(result-> {
+                //if(dbClient != null && storeDb)
+                	//dbClient.store(xid, System.currentTimeMillis(), userText, responseText);//.thenAccept(result-> {
                 		//System.out.println("Response from storage:"+result);
                 	//});
             } else {
                 if(dbClient != null) {
-                	CompletableFuture<Relation> cf = dbClient.store(xid, System.currentTimeMillis(), userText, model.tokenizer().decode(responseTokens));//.thenAccept(result-> {
+                	/*CompletableFuture<Relation> cf = dbClient.store(xid, System.currentTimeMillis(), userText, model.tokenizer().decode(responseTokens));//.thenAccept(result-> {
                 		//System.out.println("Response from storage:"+result);
                 	//});
                 	try {
                 		cf.get();
         			} catch (InterruptedException | ExecutionException e) {
     					e.printStackTrace();
-    				}
+    				}*/
                 }
             }
             if (stopToken == null) {
@@ -261,11 +263,11 @@ public class ModelRunner extends AbstractNodeMain {
         }
         // end conversation loop
         if(dbClient != null) {
-        	try {
-        		dbClient.commit(xid).get();
-        		dbClient.endTransaction(xid).get();
-        		dbClient.close();
-        	} catch(InterruptedException | ExecutionException ie) {}
+        	//try {
+        		//dbClient.commit(xid).get();
+        		//dbClient.endTransaction(xid).get();
+        		//dbClient.close();
+        	//} catch(InterruptedException | ExecutionException ie) {}
         }
         if(ModelRunner.DISPLAY_METADATA) {
         	try {
@@ -350,14 +352,16 @@ public class ModelRunner extends AbstractNodeMain {
     		millis = localDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
     		localDateTime = LocalDateTime.parse(tqe, DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss") );
     		millise = localDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
-    		s = dbClient.findSubStream(xid,'*','?','?',millis,millise,String.class,String.class);
+    		//s = dbClient.findSubStream(xid,'*','?','?',millis,millise,String.class,String.class);
     		StringBuilder sb = new StringBuilder();
+    		/*
     		try {
     			s.get().forEach(e->{
     				sb.append(((Result)e).get(0));
     				sb.append(((Result)e).get(1));
     			});
     		} catch(InterruptedException | ExecutionException ie) {}
+    		*/
     		return sb.toString();
     	}
     	return null;
@@ -371,7 +375,7 @@ public class ModelRunner extends AbstractNodeMain {
       	if(query == null || query.length < 2)
     		return null;
      	StringBuilder sb = new StringBuilder();
-      	CompletableFuture<Stream> s = dbClient.findStream(xid, '*', '?', '?');
+      	/*CompletableFuture<Stream> s = dbClient.findStream(xid, '*', '?', '?');
       	try {
       		s.get().forEach(e->{
       			String s1 = (String)((Result)e).get(0);
@@ -390,6 +394,7 @@ public class ModelRunner extends AbstractNodeMain {
       			}
       		});
       	} catch(InterruptedException | ExecutionException ie) {}
+      	*/
       	return sb.toString();
     }
     
@@ -491,8 +496,14 @@ public class ModelRunner extends AbstractNodeMain {
 	@Override
 	public void onStart(final ConnectedNode connectedNode) {
 		try {
-			dbClient = connectedNode.getRelatrixClient();
-			xid = dbClient.getTransactionId();
+			//dbClient = connectedNode.getRelatrixClient();
+			dbClient.setTablespace("D:/etc/Relatrix/db/test/ai");
+			try {
+				xid = dbClient.getTransactionId();
+			} catch (IllegalAccessException | ClassNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
 			//tensorAlias = new Alias("Tensors");
 			//try {
 			//	if(dbClient.getAlias(tensorAlias).get() == null)
@@ -554,7 +565,13 @@ public class ModelRunner extends AbstractNodeMain {
 		        	state = (Llama.State)dbClient.get(xid, 0);
 		        	if(state == null)
 		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        }
+		        } catch (IllegalAccessException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
@@ -575,7 +592,13 @@ public class ModelRunner extends AbstractNodeMain {
 		        	state = (Llama.State)dbClient.get(xid, 0);
 		        	if(state == null)
 		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        }
+		        } catch (IllegalAccessException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
@@ -596,7 +619,13 @@ public class ModelRunner extends AbstractNodeMain {
 		        	state = (Llama.State)dbClient.get(xid, 0);
 		        	if(state == null)
 		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        }
+		        } catch (IllegalAccessException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
@@ -652,6 +681,15 @@ public class ModelRunner extends AbstractNodeMain {
 		try(Timer t = Timer.log("SaveState")) {
 			dbClient.storekv(xid, 0, state);
 			dbClient.commit(xid);
+		} catch (IllegalAccessException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (DuplicateKeyException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
 		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
@@ -1042,7 +1080,7 @@ interface Timer extends AutoCloseable {
             @Override
             public void close() {
                 long elapsedNanos = System.nanoTime() - startNanos;
-                log.error(label + ": "
+                log.info(label + ": "
                         + timeUnit.convert(elapsedNanos, TimeUnit.NANOSECONDS) + " "
                         + timeUnit.toChronoUnit().name().toLowerCase());
             }
@@ -1316,7 +1354,10 @@ final class ModelLoader {
 
 record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights weights) {
 	private static final Log log = LogFactory.getLog(Llama.class);
+	private static boolean DEBUG = true;
     public State createNewState(int batchsize, int beginOfText) {
+    	if(DEBUG )
+    		log.info("Create new state...");
         State state = new State(configuration(), batchsize);
         state.latestToken = beginOfText; // was tokenizer.getSpecialTokens().get("<|begin_of_text|>");, now we get from ChatFormat.beginOfText() which does the same
         return state;
@@ -1447,42 +1488,43 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
     	@Override
     	public void writeExternal(ObjectOutput out) throws IOException {
     		out.writeInt(batchsize);
+    		out.writeInt(latestToken);
     		out.writeInt(x.length);
     		for(FloatTensor x0: x)
-    			x0.writeExternal(out); // activation at current time stamp (dim,)
+    			out.writeObject(x0); // activation at current time stamp (dim,)
     		out.writeInt(xb.length);
     		for(FloatTensor xb0: xb)
-    			xb0.writeExternal(out); // same, but inside a residual branch (dim,)
+    			out.writeObject(xb0); // same, but inside a residual branch (dim,)
     		out.writeInt(xb2.length);
     		for(FloatTensor xb20: xb2)
-    			xb20.writeExternal(out); // an additional buffer just for convenience (dim,)
+    			out.writeObject(xb20); // an additional buffer just for convenience (dim,)
     		out.writeInt(hb.length);
     		for(FloatTensor hb0: hb)
-    			hb0.writeExternal(out); // buffer for hidden dimension in the ffn (hidden_dim,)
+    			out.writeObject(hb0); // buffer for hidden dimension in the ffn (hidden_dim,)
     		out.writeInt(hb2.length);
     		for(FloatTensor hb20: hb2)
-    			hb20.writeExternal(out); // buffer for hidden dimension in the ffn (hidden_dim,)
+    			out.writeObject(hb20); // buffer for hidden dimension in the ffn (hidden_dim,)
     		out.writeInt(q.length);
     		for(FloatTensor q0: q)
-    			q0.writeExternal(out); // query (dim,)
+    			out.writeObject(q0);// query (dim,)
     		out.writeInt(k.length);
     		for(FloatTensor k0: k)
-    			k0.writeExternal(out); // key (dim,)
+    			out.writeObject(k0);// key (dim,)
     		out.writeInt(v.length);
     		for(FloatTensor v0: v)
-    			v0.writeExternal(out); // value (dim,)
+    			out.writeObject(v0); // value (dim,)
     		out.writeInt(att.length);
     		for(FloatTensor att0: att)
-    			att0.writeExternal(out); // buffer for scores/attention values (n_heads, seq_len)
-    		logits.writeExternal(out); // output logits
+    			out.writeObject(att0); // buffer for scores/attention values (n_heads, seq_len)
+    		out.writeObject(logits); // output logits
 
     		// kv cache
     		out.writeInt(keyCache.length);
     		for(FloatTensor keyCache0: keyCache)
-    			keyCache0.writeExternal(out);   // (n_layer, seq_len, kv_dim)
+    			out.writeObject(keyCache0);   // (n_layer, seq_len, kv_dim)
     		out.writeInt(valueCache.length);
     		for(FloatTensor valueCache0: valueCache)
-    			valueCache0.writeExternal(out); // (n_layer, seq_len, kv_dim)
+    			out.writeObject(valueCache0); // (n_layer, seq_len, kv_dim)
 
     		/** last index in previous block */
     		out.writeInt(idxPrevBlock);
@@ -1491,84 +1533,80 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
     	@Override
     	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
     		batchsize = in.readInt();
+    		latestToken = in.readInt();
     		int len;
     		// x
     		len = in.readInt();
     		x = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			x[i] = readTensor(in);
+    			x[i] = (FloatTensor) in.readObject();
     		}
     		// xb
     		len = in.readInt();
     		xb = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			xb[i] = readTensor(in);
+    			xb[i] = (FloatTensor) in.readObject();
     		}
     		// xb2
     		len = in.readInt();
     		xb2 = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			xb2[i] = readTensor(in);
+    			xb2[i] = (FloatTensor) in.readObject();
     		}
     		// hb
     		len = in.readInt();
     		hb = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			hb[i] = readTensor(in);
+    			hb[i] = (FloatTensor) in.readObject();
     		}
     		// hb2
     		len = in.readInt();
     		hb2 = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			hb2[i] = readTensor(in);
+    			hb2[i] = (FloatTensor) in.readObject();
     		}
     		// q
     		len = in.readInt();
     		q = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			q[i] = readTensor(in);
+    			q[i] = (FloatTensor) in.readObject();
     		}
     		// k
     		len = in.readInt();
     		k = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			k[i] = readTensor(in);
+    			k[i] = (FloatTensor) in.readObject();
     		}
     		// v
     		len = in.readInt();
     		v = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			v[i] = readTensor(in);
+    			v[i] = (FloatTensor) in.readObject();
     		}
     		// att
     		len = in.readInt();
     		att = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			att[i] = readTensor(in);
+    			att[i] = (FloatTensor) in.readObject();
     		}
     		// logits
-    		logits = readTensor(in);
+    		logits = (FloatTensor) in.readObject();
     		// keyCache
     		len = in.readInt();
     		keyCache = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			keyCache[i] = readTensor(in);
+    			keyCache[i] = (FloatTensor) in.readObject();
     		}
     		// valueCache
     		len = in.readInt();
     		valueCache = new FloatTensor[len];
     		for (int i = 0; i < len; i++) {
-    			valueCache[i] = readTensor(in);
+    			valueCache[i] = (FloatTensor) in.readObject();
     		}
     		// idxPrevBlock
     		idxPrevBlock = in.readInt();
     	}
 
-    	private FloatTensor readTensor(ObjectInput in) throws IOException, ClassNotFoundException {
-    		FloatTensor tensor = new Q8_0FloatTensor(); // Or use more dynamic type detection if needed
-    		tensor.readExternal(in);
-    		return tensor;
-    	}
     }
 
     static FloatTensor[] allocate(int numTokens, int... dims) {
@@ -1742,7 +1780,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
         		
         	}
         	try (Timer timer = Timer.log("Store Tensor:")) {
-        		ModelRunner.dbClient.storekv(ModelRunner.tensorAlias, ModelRunner.xid, "index" , state.x[nTokens-1]);
+        		//ModelRunner.dbClient.storekv(ModelRunner.tensorAlias, ModelRunner.xid, "index" , state.x[nTokens-1]);
         	}
         }
         
