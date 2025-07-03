@@ -113,7 +113,7 @@ public class ModelRunner extends AbstractNodeMain {
 	public static final String ASSIST_PROMPT = "/assist_prompt";
 	public static final String LLM = "/model";
 	
-	public CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
+	public static CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -1398,50 +1398,177 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
 
     }
 
-    public static final class State implements Serializable {
+    public static class State implements Externalizable {
     	private static final long serialVersionUID = -1L;
     	private static final Log log = LogFactory.getLog(State.class);
-        // current wave of activations
-        public final int batchsize;
-        public final FloatTensor[] x; // activation at current time stamp (dim,)
-        public final FloatTensor[] xb; // same, but inside a residual branch (dim,)
-        public final FloatTensor[] xb2; // an additional buffer just for convenience (dim,)
-        public final FloatTensor[] hb; // buffer for hidden dimension in the ffn (hidden_dim,)
-        public final FloatTensor[] hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
-        public final FloatTensor[] q; // query (dim,)
-        public final FloatTensor[] k; // key (dim,)
-        public final FloatTensor[] v; // value (dim,)
-        public final FloatTensor[] att; // buffer for scores/attention values (n_heads, seq_len)
-        public final FloatTensor logits; // output logits
+    	// current wave of activations
+    	public int batchsize;
+    	public FloatTensor[] x; // activation at current time stamp (dim,)
+    	public FloatTensor[] xb; // same, but inside a residual branch (dim,)
+    	public FloatTensor[] xb2; // an additional buffer just for convenience (dim,)
+    	public FloatTensor[] hb; // buffer for hidden dimension in the ffn (hidden_dim,)
+    	public FloatTensor[] hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
+    	public FloatTensor[] q; // query (dim,)
+    	public FloatTensor[] k; // key (dim,)
+    	public FloatTensor[] v; // value (dim,)
+    	public FloatTensor[] att; // buffer for scores/attention values (n_heads, seq_len)
+    	public FloatTensor logits; // output logits
 
-        // kv cache
-        public final FloatTensor[] keyCache;   // (n_layer, seq_len, kv_dim)
-        public final FloatTensor[] valueCache; // (n_layer, seq_len, kv_dim)
-        
-        /** last index in previous block */
-        int idxPrevBlock;
+    	// kv cache
+    	public FloatTensor[] keyCache;   // (n_layer, seq_len, kv_dim)
+    	public FloatTensor[] valueCache; // (n_layer, seq_len, kv_dim)
 
-        public int latestToken;
+    	/** last index in previous block */
+    	int idxPrevBlock;
 
-        State(Configuration config, int batchsize) {
-            this.batchsize = batchsize;
-            this.x = allocate(batchsize, config.dim);
-            this.xb = allocate(batchsize, config.dim);
-            this.xb2 = allocate(batchsize, config.dim);
-            this.hb = allocate(batchsize, config.hiddenDim);
-            this.hb2 = allocate(batchsize, config.hiddenDim);
-            this.q = allocate(batchsize, config.dim);
-            this.k = allocate(batchsize, config.dim);
-            this.v = allocate(batchsize, config.dim);
-            this.att = allocate(batchsize, config.numberOfHeads, config.contextLength);
-            idxPrevBlock = -1;
+    	public int latestToken;
 
-            this.logits = ArrayFloatTensor.allocate(config.vocabularySize);
-            int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
-            this.keyCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
-            this.valueCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
-        }
-        
+    	public State() {}
+    	
+    	State(Configuration config, int batchsize) {
+    		this.batchsize = batchsize;
+    		this.x = allocate(batchsize, config.dim);
+    		this.xb = allocate(batchsize, config.dim);
+    		this.xb2 = allocate(batchsize, config.dim);
+    		this.hb = allocate(batchsize, config.hiddenDim);
+    		this.hb2 = allocate(batchsize, config.hiddenDim);
+    		this.q = allocate(batchsize, config.dim);
+    		this.k = allocate(batchsize, config.dim);
+    		this.v = allocate(batchsize, config.dim);
+    		this.att = allocate(batchsize, config.numberOfHeads, config.contextLength);
+    		idxPrevBlock = -1;
+
+    		this.logits = ArrayFloatTensor.allocate(config.vocabularySize);
+    		int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
+    		this.keyCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
+    		this.valueCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
+    	}
+
+    	@Override
+    	public void writeExternal(ObjectOutput out) throws IOException {
+    		out.writeInt(batchsize);
+    		out.writeInt(x.length);
+    		for(FloatTensor x0: x)
+    			x0.writeExternal(out); // activation at current time stamp (dim,)
+    		out.writeInt(xb.length);
+    		for(FloatTensor xb0: xb)
+    			xb0.writeExternal(out); // same, but inside a residual branch (dim,)
+    		out.writeInt(xb2.length);
+    		for(FloatTensor xb20: xb2)
+    			xb20.writeExternal(out); // an additional buffer just for convenience (dim,)
+    		out.writeInt(hb.length);
+    		for(FloatTensor hb0: hb)
+    			hb0.writeExternal(out); // buffer for hidden dimension in the ffn (hidden_dim,)
+    		out.writeInt(hb2.length);
+    		for(FloatTensor hb20: hb2)
+    			hb20.writeExternal(out); // buffer for hidden dimension in the ffn (hidden_dim,)
+    		out.writeInt(q.length);
+    		for(FloatTensor q0: q)
+    			q0.writeExternal(out); // query (dim,)
+    		out.writeInt(k.length);
+    		for(FloatTensor k0: k)
+    			k0.writeExternal(out); // key (dim,)
+    		out.writeInt(v.length);
+    		for(FloatTensor v0: v)
+    			v0.writeExternal(out); // value (dim,)
+    		out.writeInt(att.length);
+    		for(FloatTensor att0: att)
+    			att0.writeExternal(out); // buffer for scores/attention values (n_heads, seq_len)
+    		logits.writeExternal(out); // output logits
+
+    		// kv cache
+    		out.writeInt(keyCache.length);
+    		for(FloatTensor keyCache0: keyCache)
+    			keyCache0.writeExternal(out);   // (n_layer, seq_len, kv_dim)
+    		out.writeInt(valueCache.length);
+    		for(FloatTensor valueCache0: valueCache)
+    			valueCache0.writeExternal(out); // (n_layer, seq_len, kv_dim)
+
+    		/** last index in previous block */
+    		out.writeInt(idxPrevBlock);
+    	}
+
+    	@Override
+    	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+    		batchsize = in.readInt();
+    		int len;
+    		// x
+    		len = in.readInt();
+    		x = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			x[i] = readTensor(in);
+    		}
+    		// xb
+    		len = in.readInt();
+    		xb = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			xb[i] = readTensor(in);
+    		}
+    		// xb2
+    		len = in.readInt();
+    		xb2 = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			xb2[i] = readTensor(in);
+    		}
+    		// hb
+    		len = in.readInt();
+    		hb = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			hb[i] = readTensor(in);
+    		}
+    		// hb2
+    		len = in.readInt();
+    		hb2 = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			hb2[i] = readTensor(in);
+    		}
+    		// q
+    		len = in.readInt();
+    		q = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			q[i] = readTensor(in);
+    		}
+    		// k
+    		len = in.readInt();
+    		k = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			k[i] = readTensor(in);
+    		}
+    		// v
+    		len = in.readInt();
+    		v = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			v[i] = readTensor(in);
+    		}
+    		// att
+    		len = in.readInt();
+    		att = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			att[i] = readTensor(in);
+    		}
+    		// logits
+    		logits = readTensor(in);
+    		// keyCache
+    		len = in.readInt();
+    		keyCache = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			keyCache[i] = readTensor(in);
+    		}
+    		// valueCache
+    		len = in.readInt();
+    		valueCache = new FloatTensor[len];
+    		for (int i = 0; i < len; i++) {
+    			valueCache[i] = readTensor(in);
+    		}
+    		// idxPrevBlock
+    		idxPrevBlock = in.readInt();
+    	}
+
+    	private FloatTensor readTensor(ObjectInput in) throws IOException, ClassNotFoundException {
+    		FloatTensor tensor = new Q8_0FloatTensor(); // Or use more dynamic type detection if needed
+    		tensor.readExternal(in);
+    		return tensor;
+    	}
     }
 
     static FloatTensor[] allocate(int numTokens, int... dims) {
@@ -2595,6 +2722,7 @@ final class Q4_0FloatTensor extends FloatTensor implements Externalizable, Compa
 		out.writeInt(size);
 		out.writeLong(memorySegment.byteSize());
 		out.write(memorySegment.toArray(ValueLayout.JAVA_BYTE));
+		out.flush();
 	}
 
 	@Override
@@ -2741,6 +2869,7 @@ final class Q8_0FloatTensor extends FloatTensor implements Externalizable, Compa
 		out.writeInt(size);
 		out.writeLong(memorySegment.byteSize());
 		out.write(memorySegment.toArray(ValueLayout.JAVA_BYTE));
+		out.flush();
 	}
 
 	@Override
@@ -2859,6 +2988,7 @@ final class BF16FloatTensor extends FloatTensor implements Externalizable, Compa
 		out.writeInt(size);
 		out.writeLong(memorySegment.byteSize());
 		out.write(memorySegment.toArray(ValueLayout.JAVA_BYTE));
+		out.flush();
 	}
 
 	@Override
@@ -2991,6 +3121,7 @@ final class F16FloatTensor extends FloatTensor implements Externalizable, Compar
 		out.writeInt(size);
 		out.writeLong(memorySegment.byteSize());
 		out.write(memorySegment.toArray(ValueLayout.JAVA_BYTE));
+		out.flush();
 	}
 
 	@Override
@@ -3064,6 +3195,7 @@ final class F32FloatTensor extends FloatTensor implements Externalizable, Compar
 		out.writeInt(size);
 		out.writeLong(memorySegment.byteSize());
 		out.write(memorySegment.toArray(ValueLayout.JAVA_BYTE));
+		out.flush();
 	}
 
 	@Override
@@ -3148,6 +3280,7 @@ final class ArrayFloatTensor extends FloatTensor implements Externalizable, Comp
         ByteBuffer buffer = ByteBuffer.allocate(values.length * Float.BYTES);
         for (float v : values) buffer.putFloat(v);
         out.write(buffer.array());
+        out.flush();
     }
 
     @Override
