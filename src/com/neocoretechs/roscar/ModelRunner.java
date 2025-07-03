@@ -259,6 +259,7 @@ public class ModelRunner extends AbstractNodeMain {
                 break;
             }
         }
+        // end conversation loop
         if(dbClient != null) {
         	try {
         		dbClient.commit(xid).get();
@@ -287,43 +288,7 @@ public class ModelRunner extends AbstractNodeMain {
         }
     }
 
-    static void runInstructOnce(Llama model, Sampler sampler, Options options) {
-        ChatFormatInterface chatFormat;
-        // Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
-        if(ModelLoader.name.equals("mistral")) {
-        	chatFormat = new MistralChatFormat(model.tokenizer());
-        } else {
-        	if(ModelLoader.name.equals("llama")) {
-        		chatFormat = new ChatFormat(model.tokenizer());
-        	} else {
-        		throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
-        	}
-        }
-        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-        List<Integer> promptTokens = new ArrayList<>();
-        promptTokens.add(chatFormat.getBeginOfText());
-        if (options.systemPrompt() != null) {
-            promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
-        }
-        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, options.prompt())));
-        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
-
-        Set<Integer> stopTokens = chatFormat.getStopTokens();
-        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
-            if (options.stream()) {
-                if (!model.tokenizer().isSpecialToken(token)) {
-                    System.out.print(model.tokenizer().decode(List.of(token)));
-                }
-            }
-        });
-        if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
-            responseTokens.removeLast();
-        }
-        if (!options.stream()) {
-            String responseText = model.tokenizer().decode(responseTokens);
-            log.info(responseText);
-        }
-    }
+ 
     /**
      * Parse the command line for url and xpath directive
      * @param urlc array of cmdl args, link at 0
@@ -435,7 +400,6 @@ public class ModelRunner extends AbstractNodeMain {
 
         Options {
             require(modelPath != null, "Missing argument: --model <path> is required");
-            require(interactive || prompt != null, "Missing argument: --prompt is required in --instruct mode e.g. --prompt \"Why is the sky blue?\"");
             require(0 <= temperature, "Invalid argument: --temperature must be non-negative");
             require(0 <= topp && topp <= 1, "Invalid argument: --top-p must be within [0, 1]");
         }
@@ -443,35 +407,25 @@ public class ModelRunner extends AbstractNodeMain {
         static void require(boolean condition, String messageFormat, Object... args) {
             if (!condition) {
                 log.error("ERROR " + messageFormat.formatted(args));
-                //System.out.println();
-                //printUsage(System.out);
+                log.info(printUsage());
                 System.exit(-1);
             }
         }
 
-        static void printUsage(PrintStream out) {
-            out.println("Usage:  java ModelRunner [options]");
-            out.println();
-            out.println("Options:");
-            out.println("  --model, -m <path>            required, path to .gguf file");
-            out.println("  --interactive, --chat, -i     run in chat mode");
-            out.println("  --instruct                    run in instruct (once) mode, default mode");
-            out.println("  --prompt, -p <string>         input prompt");
-            out.println("  --system-prompt, -sp <string> (optional) system prompt");
-            out.println("  --temperature, -temp <float>  temperature in [0,inf], default 0.1");
-            out.println("  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95");
-            out.println("  --seed <long>                 random seed, default System.nanoTime()");
-            out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
-            out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
-            out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
-            out.println("  --metadata                    write metadata file of <model file>.metadata");
-            out.println();
-            out.println("Examples:");
-            out.println("  java ModelRunner --model llama3.2-1b-q4_0.gguf --prompt \"Tell me a joke\"");
-            out.println("  java ModelRunner --model llama3.2-1b-q4_0.gguf --system-prompt \"Reply concisely, in French\" --prompt \"Who was Marie Curie?\"");
-            out.println("  java ModelRunner --model llama3.2-1b-q4_0.gguf --system-prompt \"Answer concisely\" --chat");
-            out.println("  java ModelRunner --model llama3.2-1b-q4_0.gguf --chat");
-            out.println("  java ModelRunner --model llama3.2-1b-q4_0.gguf --prompt \"Print 5 emojis\" --stream=false");
+        static String printUsage() {
+            return 
+            "Options:\r\n"+
+            "  --model, -m <path>            required, path to .gguf file\r\n"+
+            "  --system-prompt, -sp <string> (optional) system prompt\r\n"+
+            "  --temperature, -temp <float>  temperature in [0,inf], default 0.1\r\n"+
+            "  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95\r\n"+
+            "  --seed <long>                 random seed, default System.nanoTime()\r\n"+
+            "  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS+"\r\n"+
+            "  --echo <boolean>              print ALL tokens to stderr, if true, default false\r\n"+
+            "  --metadata                    write metadata file of <model file>.metadata\r\n\r\n"+
+            "Examples:\r\n"+
+            " --system-prompt \"Reply concisely, in French\"\r\n"+
+            " --system-prompt \"Answer concisely\"\r\n";
         }
 
         static Options parseOptions(String[] args) {
@@ -497,7 +451,7 @@ public class ModelRunner extends AbstractNodeMain {
                     case "--interactive", "--chat", "-i" -> interactive = true;
                     case "--instruct" -> interactive = false;
                     case "--help", "-h" -> {
-                        printUsage(System.out);
+                        log.info(printUsage());
                         System.exit(0);
                     }
                     default -> {
@@ -512,14 +466,12 @@ public class ModelRunner extends AbstractNodeMain {
                             i += 1; // skip arg
                         }
                         switch (optionName) {
-                            case "--prompt", "-p" -> prompt = nextArg;
                             case "--system-prompt", "-sp" -> systemPrompt = nextArg;
                             case "--temperature", "--temp" -> temperature = Float.parseFloat(nextArg);
                             case "--top-p" -> topp = Float.parseFloat(nextArg);
                             case "--model", "-m" -> modelPath = Paths.get(nextArg);
                             case "--seed", "-s" -> seed = Long.parseLong(nextArg);
                             case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
-                            case "--stream" -> stream = Boolean.parseBoolean(nextArg);
                             case "--echo" -> echo = Boolean.parseBoolean(nextArg);
                             case "--metadata" -> DISPLAY_METADATA = true;
                             default -> require(false, "Unknown option: %s", optionName);
@@ -541,11 +493,11 @@ public class ModelRunner extends AbstractNodeMain {
 		try {
 			dbClient = connectedNode.getRelatrixClient();
 			xid = dbClient.getTransactionId();
-			tensorAlias = new Alias("Tensors");
-			try {
-				if(dbClient.getAlias(tensorAlias).get() == null)
-					dbClient.setRelativeAlias(tensorAlias);
-			} catch(ExecutionException | InterruptedException ie) {}
+			//tensorAlias = new Alias("Tensors");
+			//try {
+			//	if(dbClient.getAlias(tensorAlias).get() == null)
+			//		dbClient.setRelativeAlias(tensorAlias);
+			//} catch(ExecutionException | InterruptedException ie) {}
 			if(DEBUG)
 				log.info("Relatrix transaction Id:"+xid);
 		} catch(IOException ioe) {
@@ -597,13 +549,18 @@ public class ModelRunner extends AbstractNodeMain {
 		subsuser.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        Llama.State state = null;
+		        try(Timer t = Timer.log("GetState")) {
+		        	state = (Llama.State)dbClient.get(xid, 0);
+		        	if(state == null)
+		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        }
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	log.info("Queueing from role USER:"+response.get());
+		        	//log.info("Queueing from role USER:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -613,13 +570,18 @@ public class ModelRunner extends AbstractNodeMain {
 		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        Llama.State state = null;
+		        try(Timer t = Timer.log("GetState")) {
+		        	state = (Llama.State)dbClient.get(xid, 0);
+		        	if(state == null)
+		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        }
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	log.info("Queueing from role SYSTEM:"+response.get());
+		        	//log.info("Queueing from role SYSTEM:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
         			} catch(InterruptedException ie) {}
@@ -629,13 +591,18 @@ public class ModelRunner extends AbstractNodeMain {
 		subsassist.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        Llama.State state = null;
+		        try(Timer t = Timer.log("GetState")) {
+		        	state = (Llama.State)dbClient.get(xid, 0);
+		        	if(state == null)
+		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        }
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
 		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	log.info("Queueing from role ASSIST:"+response.get());
+		        	//log.info("Queueing from role ASSIST:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -669,7 +636,7 @@ public class ModelRunner extends AbstractNodeMain {
 				std_msgs.String pubmess = pubmodel.newMessage();
 				pubmess.setData(responseData);
 				//pubmess.setHeader(imghead);
-				log.info("Publishing "+responseData);
+				//log.info("Publishing "+responseData);
 				pubmodel.publish(pubmess);
 				sequenceNumber++;
 			}
@@ -682,6 +649,10 @@ public class ModelRunner extends AbstractNodeMain {
         if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
             responseTokens.removeLast();
         }
+		try(Timer t = Timer.log("SaveState")) {
+			dbClient.storekv(xid, 0, state);
+			dbClient.commit(xid);
+		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
 
@@ -1427,7 +1398,8 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
 
     }
 
-    public static final class State {
+    public static final class State implements Serializable {
+    	private static final long serialVersionUID = -1L;
     	private static final Log log = LogFactory.getLog(State.class);
         // current wave of activations
         public final int batchsize;
@@ -1469,6 +1441,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
             this.keyCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
             this.valueCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
         }
+        
     }
 
     static FloatTensor[] allocate(int numTokens, int... dims) {
@@ -2626,11 +2599,11 @@ final class Q4_0FloatTensor extends FloatTensor implements Externalizable, Compa
 
 	@Override
 	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		size = in.readInt();
-		long bs = in.readLong();
-		memorySegment = Arena.ofAuto().allocate(bs, 1);
-		for(int i = 0; i < bs; i++)
-			memorySegment.set(ValueLayout.JAVA_BYTE, i, (byte)(in.read() & 0xFF));
+	    size = in.readInt();
+	    long bs = in.readLong();
+	    byte[] bytes = new byte[(int) bs];
+	    in.readFully(bytes); // Properly consumes block data
+	    memorySegment = MemoryUtils.allocateSegmentFromBytes(bytes, Arena.ofAuto());
 	}
 
 	@Override
@@ -2772,12 +2745,13 @@ final class Q8_0FloatTensor extends FloatTensor implements Externalizable, Compa
 
 	@Override
 	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		size = in.readInt();
-		long bs = in.readLong();
-		memorySegment = Arena.ofAuto().allocate(bs, 1);
-		for(int i = 0; i < bs; i++)
-			memorySegment.set(ValueLayout.JAVA_BYTE, i, (byte)(in.read() & 0xFF));
+	    size = in.readInt();
+	    long bs = in.readLong();
+	    byte[] bytes = new byte[(int) bs];
+	    in.readFully(bytes); // Properly consumes block data
+	    memorySegment = MemoryUtils.allocateSegmentFromBytes(bytes, Arena.ofAuto());
 	}
+
 
 	@Override
 	public int compareTo(Object o) {
@@ -2889,12 +2863,13 @@ final class BF16FloatTensor extends FloatTensor implements Externalizable, Compa
 
 	@Override
 	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		size = in.readInt();
-		long bs = in.readLong();
-		memorySegment = Arena.ofAuto().allocate(bs, 1);
-		for(int i = 0; i < bs; i++)
-			memorySegment.set(ValueLayout.JAVA_BYTE, i, (byte)(in.read() & 0xFF));
+	    size = in.readInt();
+	    long bs = in.readLong();
+	    byte[] bytes = new byte[(int) bs];
+	    in.readFully(bytes); // Properly consumes block data
+	    memorySegment = MemoryUtils.allocateSegmentFromBytes(bytes, Arena.ofAuto());
 	}
+
 
 	@Override
 	public int compareTo(Object o) {
@@ -3020,12 +2995,13 @@ final class F16FloatTensor extends FloatTensor implements Externalizable, Compar
 
 	@Override
 	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		size = in.readInt();
-		long bs = in.readLong();
-		memorySegment = Arena.ofAuto().allocate(bs, 1);
-		for(int i = 0; i < bs; i++)
-			memorySegment.set(ValueLayout.JAVA_BYTE, i, (byte)(in.read() & 0xFF));
+	    size = in.readInt();
+	    long bs = in.readLong();
+	    byte[] bytes = new byte[(int) bs];
+	    in.readFully(bytes); // Properly consumes block data
+	    memorySegment = MemoryUtils.allocateSegmentFromBytes(bytes, Arena.ofAuto());
 	}
+
 
 	@Override
 	public int compareTo(Object o) {
@@ -3092,12 +3068,13 @@ final class F32FloatTensor extends FloatTensor implements Externalizable, Compar
 
 	@Override
 	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		size = in.readInt();
-		long bs = in.readLong();
-		memorySegment = Arena.ofAuto().allocate(bs, 1);
-		for(int i = 0; i < bs; i++)
-			memorySegment.set(ValueLayout.JAVA_BYTE, i, (byte)(in.read() & 0xFF));
+	    size = in.readInt();
+	    long bs = in.readLong();
+	    byte[] bytes = new byte[(int) bs];
+	    in.readFully(bytes); // Properly consumes block data
+	    memorySegment = MemoryUtils.allocateSegmentFromBytes(bytes, Arena.ofAuto());
 	}
+
 
 	@Override
 	public int compareTo(Object o) {
@@ -3165,25 +3142,36 @@ final class ArrayFloatTensor extends FloatTensor implements Externalizable, Comp
         return FloatVector.fromArray(species, values, index);
     }
     
-	@Override
-	public void writeExternal(ObjectOutput out) throws IOException {
-		out.writeInt(values.length);
-		for(float v: values)
-			out.writeFloat(v);	
-	}
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+        out.writeInt(values.length);
+        ByteBuffer buffer = ByteBuffer.allocate(values.length * Float.BYTES);
+        for (float v : values) buffer.putFloat(v);
+        out.write(buffer.array());
+    }
 
-	@Override
-	public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-		int vsize = in.readInt();
-		values = new float[vsize];
-		for(int i = 0; i < vsize; i++)
-			values[i]= in.readFloat();
-	}
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+        int vsize = in.readInt();
+        byte[] bytes = new byte[vsize * Float.BYTES];
+        in.readFully(bytes);
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        values = new float[vsize];
+        for (int i = 0; i < vsize; i++) values[i] = buffer.getFloat();
+    }
 
 	@Override
 	public int compareTo(Object o) {
 		return Arrays.compare(values,((ArrayFloatTensor)o).values);
 	}
+}
+
+final class MemoryUtils {
+    public static MemorySegment allocateSegmentFromBytes(byte[] bytes, Arena arena) {
+        MemorySegment segment = arena.allocate(bytes.length, 1); // allocate off-heap with alignment
+        segment.copyFrom(MemorySegment.ofArray(bytes)); // copy contents
+        return segment;
+    }
 }
 
 final class RoPE {
