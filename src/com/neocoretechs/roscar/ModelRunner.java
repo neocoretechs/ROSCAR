@@ -99,8 +99,8 @@ public class ModelRunner extends AbstractNodeMain {
     private static int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
     public final static boolean DEBUG = false;
     public static boolean DISPLAY_METADATA = false;
-    //public static AsynchRelatrixClientTransaction dbClient = null;
-    static RelatrixTransaction dbClient = null;
+    public static AsynchRelatrixClientTransaction dbClient = null;
+    //static RelatrixTransaction dbClient = null;
     public static TransactionId xid = null;
     public static Alias tensorAlias = null;
     // metadata dump
@@ -144,132 +144,25 @@ public class ModelRunner extends AbstractNodeMain {
         return sampler;
     }
 
-    static void runInteractive(Llama model, Sampler sampler, Options options) {
-        Llama.State state = null;
-        List<Integer> conversationTokens = new ArrayList<>();
-        ChatFormatInterface chatFormat;
+    public static String getContextInfo(Llama model, List<Integer> conversationTokens) {
+    	return String.format("%d out of %d context tokens used (%d tokens remaining)%n",
+                conversationTokens.size(),
+                model.configuration().contextLength,
+                model.configuration().contextLength - conversationTokens.size());
+    }
+    
+    public void displayMetadata(Llama model) {
         if(DISPLAY_METADATA) {
+    		try {
+    			ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
+    			ModelRunner.outputStream = new BufferedWriter(fileWriter);
+    			ModelRunner.output = new PrintWriter(outputStream);
+    		} catch(IOException e) {
+    			log.error("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
+    		}
         	ModelRunner.output.println("Begin Special tokens:");
         	ModelRunner.output.println(model.tokenizer().getSpecialTokens());
         	ModelRunner.output.println("End Special tokens.\r\n");
-        }
-        // Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
-        if(ModelLoader.name.equals("mistral")) {
-        	chatFormat = new MistralChatFormat(model.tokenizer());
-        } else {
-        	if(ModelLoader.name.equals("llama")) {
-        		chatFormat = new ChatFormat(model.tokenizer());
-        	} else {
-        		throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
-        	}
-        }
-        conversationTokens.add(chatFormat.getBeginOfText());
-        if (options.systemPrompt() != null) {
-            conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
-        }
-        
-        int startPosition = 0;
-        Scanner in = new Scanner(System.in);
-        loop: while (true) {
-        	boolean storeDb = true;
-            System.out.print("> ");
-            System.out.flush();
-            String userText = in.nextLine();
-            switch (userText) {
-                case "/quit":
-                case "/exit": break loop;
-                case "/context": {
-                    log.info(String.format("%d out of %d context tokens used (%d tokens remaining)%n",
-                            conversationTokens.size(),
-                            model.configuration().contextLength,
-                            model.configuration().contextLength - conversationTokens.size()));
-                    continue;
-                }
-            }
-            if(userText.startsWith("www.") || userText.startsWith("http://") || userText.startsWith("https://")) {
-            	String[] urlc = userText.split(" ");
-            	Element result = parseLinks(urlc);
-            	// replace userText
-            	if(result == null)
-            		continue;
-            	userText = result.text();
-            	log.info(userText);
-            } else {
-            	if(userText.startsWith("/recalltime")) {
-            		storeDb = false;
-            		String[] query = userText.split(" ");
-            		String s = parseTime(query);
-            		if(s == null)
-            			continue;
-            		userText = s;
-                  	log.info(userText);
-            	} else {
-                  	if(userText.startsWith("/recallwords")) {
-                  		storeDb = false;
-                		String[] query = userText.split(" ");
-                		String s = parseKeywords(query);
-                		if(s == null)
-                			continue;
-                		userText = s;
-                      	log.info(userText);
-                  	}
-            	}
-            }
-            if (state == null) {
-                state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-            }
-            conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
-            conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
-            Set<Integer> stopTokens = chatFormat.getStopTokens();
-            List<Integer> responseTokens;
-            responseTokens = Llama.generateTokens(model, state, startPosition, conversationTokens.subList(startPosition, conversationTokens.size()), stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
-            	if (options.stream()) {
-            		if (!model.tokenizer().isSpecialToken(token)) {
-            			System.out.print(model.tokenizer().decode(List.of(token)));
-            		}
-            	}
-            });
-            // Include stop token in the prompt history, but not in the response displayed to the user.
-            conversationTokens.addAll(responseTokens);
-            startPosition = conversationTokens.size();
-            Integer stopToken = null;
-            if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
-                stopToken = responseTokens.getLast();
-                responseTokens.removeLast();
-            }
-            if (!options.stream()) {
-                String responseText = model.tokenizer().decode(responseTokens);
-                System.out.println(responseText);
-                //if(dbClient != null && storeDb)
-                	//dbClient.store(xid, System.currentTimeMillis(), userText, responseText);//.thenAccept(result-> {
-                		//System.out.println("Response from storage:"+result);
-                	//});
-            } else {
-                if(dbClient != null) {
-                	/*CompletableFuture<Relation> cf = dbClient.store(xid, System.currentTimeMillis(), userText, model.tokenizer().decode(responseTokens));//.thenAccept(result-> {
-                		//System.out.println("Response from storage:"+result);
-                	//});
-                	try {
-                		cf.get();
-        			} catch (InterruptedException | ExecutionException e) {
-    					e.printStackTrace();
-    				}*/
-                }
-            }
-            if (stopToken == null) {
-                log.error("Ran out of context length...");
-                break;
-            }
-        }
-        // end conversation loop
-        if(dbClient != null) {
-        	//try {
-        		//dbClient.commit(xid).get();
-        		//dbClient.endTransaction(xid).get();
-        		//dbClient.close();
-        	//} catch(InterruptedException | ExecutionException ie) {}
-        }
-        if(ModelRunner.DISPLAY_METADATA) {
         	try {
         		ModelRunner.outputStream.flush();
         		ModelRunner.output.close();
@@ -289,8 +182,6 @@ public class ModelRunner extends AbstractNodeMain {
         	}
         }
     }
-
- 
     /**
      * Parse the command line for url and xpath directive
      * @param urlc array of cmdl args, link at 0
@@ -445,9 +336,6 @@ public class ModelRunner extends AbstractNodeMain {
             boolean interactive = false;
             boolean stream = true;
             boolean echo = false;
-            String localNode = null;
-            String remoteNode = null;
-            int remotePort = 0;
 
             for (int i = 0; i < args.length; i++) {
                 String optionName = args[i];
@@ -496,14 +384,11 @@ public class ModelRunner extends AbstractNodeMain {
 	@Override
 	public void onStart(final ConnectedNode connectedNode) {
 		try {
-			//dbClient = connectedNode.getRelatrixClient();
-			dbClient.setTablespace("D:/etc/Relatrix/db/test/ai");
-			try {
+			dbClient = connectedNode.getRelatrixClient();
+			//dbClient.setTablespace("D:/etc/Relatrix/db/test/ai");
+			//try {
 				xid = dbClient.getTransactionId();
-			} catch (IllegalAccessException | ClassNotFoundException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
+			//} catch (IllegalAccessException | ClassNotFoundException e) {}
 			//tensorAlias = new Alias("Tensors");
 			//try {
 			//	if(dbClient.getAlias(tensorAlias).get() == null)
@@ -518,15 +403,6 @@ public class ModelRunner extends AbstractNodeMain {
 		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
 		ChatFormatInterface chatFormat;
 
-		if(ModelRunner.DISPLAY_METADATA) {
-			try {
-				ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
-				ModelRunner.outputStream = new BufferedWriter(fileWriter);
-				ModelRunner.output = new PrintWriter(outputStream);
-			} catch(IOException e) {
-				log.error("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
-			}
-		}
 		try {
 			model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
 			if(model == null)
@@ -560,22 +436,16 @@ public class ModelRunner extends AbstractNodeMain {
 		subsuser.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = null;
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = null;
 		        try(Timer t = Timer.log("GetState")) {
-		        	state = (Llama.State)dbClient.get(xid, 0);
-		        	if(state == null)
-		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        } catch (IllegalAccessException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				} catch (IOException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-		        List<Integer> promptTokens = new ArrayList<>();
+		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
+		        }
+		        if(promptTokens == null)
+		        	promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
-		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role USER:"+response.get());
 		        	try {
@@ -587,22 +457,16 @@ public class ModelRunner extends AbstractNodeMain {
 		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = null;
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = null;
 		        try(Timer t = Timer.log("GetState")) {
-		        	state = (Llama.State)dbClient.get(xid, 0);
-		        	if(state == null)
-		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        } catch (IllegalAccessException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				} catch (IOException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-		        List<Integer> promptTokens = new ArrayList<>();
+		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
+		        }
+		        if(promptTokens == null)
+		        	promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
-		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role SYSTEM:"+response.get());
 		        	try {
@@ -614,22 +478,16 @@ public class ModelRunner extends AbstractNodeMain {
 		subsassist.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = null;
+		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		        List<Integer> promptTokens = null;
 		        try(Timer t = Timer.log("GetState")) {
-		        	state = (Llama.State)dbClient.get(xid, 0);
-		        	if(state == null)
-		        		state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        } catch (IllegalAccessException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				} catch (IOException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-		        List<Integer> promptTokens = new ArrayList<>();
+		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
+		        }
+		        if(promptTokens == null)
+		        	promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
-		        Optional<String> response = processMessage(model , options, sampler, state, chatFormat, promptTokens);
+		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role ASSIST:"+response.get());
 		        	try {
@@ -646,12 +504,10 @@ public class ModelRunner extends AbstractNodeMain {
 		 */
 		connectedNode.executeCancellableLoop(new CancellableLoop() {
 			private int sequenceNumber;
-
 			@Override
 			protected void setup() {
 				sequenceNumber = 0;
 			}
-
 			@Override
 			protected void loop() throws InterruptedException {
 				//log.info(connectedNode.getName()+" "+sequenceNumber);		
@@ -679,19 +535,39 @@ public class ModelRunner extends AbstractNodeMain {
             responseTokens.removeLast();
         }
 		try(Timer t = Timer.log("SaveState")) {
-			dbClient.storekv(xid, 0, state);
+			dbClient.storekv(xid, 0, responseTokens);
 			dbClient.commit(xid);
-		} catch (IllegalAccessException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch (IOException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch (DuplicateKeyException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
 		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
+	}
+	
+	public static final int HISTORY_DEPTH = 3; // last 3 messages
+	public static List<Integer> buildPrompt(ChatFormatInterface format,
+			List<ChatFormat.Message> recentMessages,
+			FloatTensor queryVec,
+			Llama model,
+			Options options) {
+		List<Integer> promptTokens = new ArrayList<>();
+		// System prompt
+		promptTokens.add(format.getBeginOfText());
+		if (options.systemPrompt() != null) {
+			promptTokens.addAll(format.encodeMessage(new ChatFormat.Message(
+					ChatFormat.Role.SYSTEM, options.systemPrompt())));
+		}
+		// Semantic memory via Relatrix
+		//List<Result> retrieved = MemoryAugmentor.augmentState(queryVec);
+		//for (Result r : retrieved) {
+		//	promptTokens.addAll(format.encodeMessage(new ChatFormat.Message(
+		//			ChatFormat.Role.SYSTEM, "Relevant: " + r.word())));
+		//}
+		// Most recent messages
+		int start = Math.max(0, recentMessages.size() - HISTORY_DEPTH);
+		for (int i = start; i < recentMessages.size(); i++) {
+			promptTokens.addAll(format.encodeMessage(recentMessages.get(i)));
+		}
+		// Assistant header
+		promptTokens.addAll(format.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
+		return promptTokens;
 	}
 
 }
