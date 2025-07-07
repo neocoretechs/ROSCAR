@@ -51,8 +51,6 @@ import java.util.function.IntFunction;
 import java.util.function.LongConsumer;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
-import java.util.Random;
-import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -3821,7 +3819,6 @@ final class HashTable implements Serializable {
 	private static final Log log = LogFactory.getLog(HashTable.class);
 	private static final long serialVersionUID = -5410017645908038641L;
 	private static boolean DEBUG = true;
-	private static int radius = 500;
 	/**
 	 * Contains the mapping between a combination of a number of hashes (encoded
 	 * using an integer) and a list of possible nearest neighbours
@@ -3948,9 +3945,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 	private static final long serialVersionUID = -5410017645908038641L;
 	private static boolean DEBUG = true;
 	public static final int VECTOR_DIMENSION = 50;
-	public static int numberOfHashTables = 16;
-	public static int numberOfHashes = 12;
-	public static Relatrix relatrix;
+	public int numberOfHashTables = 16;
+	public int numberOfHashes = 12;
+	public AsynchRelatrixClientTransaction dbClient;
+	private TransactionId xid;
 
 	/**
 	 * Contains the mapping between a combination of a number of hashes (encoded
@@ -3970,7 +3968,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 *            The hash function family knows how to create new hash
 	 *            functions, and is used therefore.
 	 */
-	public RelatrixLSH(int numberOfHashes, int numberOfHashTables, int projectionVectorSize) {
+	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient, int numberOfHashes, int numberOfHashTables, int projectionVectorSize) {
+		this.dbClient = dbClient;
+		this.numberOfHashes = numberOfHashes;
+		this.numberOfHashTables = numberOfHashTables;
 		this.key = UUID.randomUUID();
 		this.hashTable = new ArrayList<CosineHash[]>();
 		for(int i = 0; i < numberOfHashTables; i++) {
@@ -3984,6 +3985,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 				for(int j = 0; j < numberOfHashes; j++)
 					cHash[j] = new CosineHash(projectionVectorSize);
 		}
+		xid = dbClient.getTransactionId();
 	}
 	
 	public UUID getKey() {
@@ -4004,56 +4006,91 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
 	 * @throws IllegalArgumentException 
+	 * @throws ExecutionException 
+	 * @throws InterruptedException 
 	 */
-	public List<Result> query(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException {
+	public List<Result> query(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		ArrayList<Result> res = new ArrayList<Result>();
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), query);
 			if(DEBUG)
 				log.info("Querying combined hash for query "+i+" of "+hashTable.size()+":"+combinedHash);
-			Iterator<?> it = relatrix.findSet(combinedHash, '?', '?');
+			CompletableFuture<Iterator> cit = dbClient.findSet(xid, combinedHash, '?', '?');
+			Iterator<?> it = cit.get();
 			int cnt = 0;
 			while(it.hasNext()) {
 				res.add((Result) it.next());
-				System.out.print(++cnt+"\r");
+				//System.out.print(++cnt+"\r");
 			}
-			System.out.println();
+			//System.out.println();
 		}
 		return res;
 	}
-	public List<Result> queryParallel(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException {
+	public List<Result> queryParallel(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> res = new ArrayList<Result>();
 		ArrayList<Object> iq = new ArrayList<Object>();
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), query);
 			iq.add(combinedHash);
 		}
-		long tims = System.currentTimeMillis();
-		if(DEBUG)
-			log.info("Querying combined hash for table of "+hashTable.size());
-		res = relatrix.findSetParallel(iq, '?', '?');
-		if(DEBUG)
-			log.info((System.currentTimeMillis()-tims)+" ms.");
+        try (var timer = Timer.log("Querying combined hash for table of "+hashTable.size())) {
+        	CompletableFuture<List> cres = dbClient.findSetParallel(xid, iq, '?', '?');
+        	res = cres.get();
+        }
 		return res;
+	}
+
+	public class TokenNormalizer {
+
+		/**
+		 * Normalizes integer tokens into a zero-centered, unit-length float tensor
+		 * for cosine similarity use with Gaussian random projection.
+		 */
+		public static FloatTensor normalize(List<Integer> tokens) {
+			int size = tokens.size();
+			float[] floats = new float[size];
+			// Cast tokens to float and compute mean
+			float mean = 0.0f;
+			for (int i = 0; i < size; i++) {
+				float value = (float) tokens.get(i);
+				floats[i] = value;
+				mean += value;
+			}
+			mean /= size;
+			// Zero-center
+			for (int i = 0; i < size; i++) {
+				floats[i] -= mean;
+			}
+			// Unit-length normalization
+			float norm = 0.0f;
+			for (float f : floats) {
+				norm += f * f;
+			}
+			norm = (float) Math.sqrt(norm);
+			if (norm != 0f) {
+				for (int i = 0; i < size; i++) {
+					floats[i] /= norm;
+				}
+			}
+			return new F32FloatTensor(size, MemorySegment.ofArray(floats));
+		}
 	}
 
 	/**
 	 * Add a vector to the index.
-	 * @param word the word that vectorized
 	 * @param vector the embedding of the word
 	 * @throws DuplicateKeyException 
 	 * @throws IOException 
 	 * @throws ClassNotFoundException 
 	 * @throws IllegalAccessException 
+	 * @throws ExecutionException 
+	 * @throws InterruptedException 
 	 */
-	public void add(String word, FloatTensor vector) throws IllegalAccessException, ClassNotFoundException, IOException {
+	public void add(FloatTensor vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), vector);
-			try {
-				relatrix.store(combinedHash, word, vector);
-			} catch (DuplicateKeyException e) {
-				log.error("duplicate key:"+combinedHash+" for "+word);
-			}
+			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), vector);
+			res.get();
 		}
 	}
 	
