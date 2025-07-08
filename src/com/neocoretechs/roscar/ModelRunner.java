@@ -21,14 +21,12 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.ObjectInput;
 import java.io.ObjectOutput;
-import java.io.PrintStream;
 import java.io.PrintWriter;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.lang.reflect.Field;
-import java.net.MalformedURLException;
-import java.net.URL;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -38,9 +36,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -59,8 +59,6 @@ import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
-import java.security.InvalidParameterException;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.jsoup.Jsoup;
@@ -68,10 +66,8 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 
-import org.ros.Topics;
 import org.ros.concurrent.CancellableLoop;
 import org.ros.concurrent.CircularBlockingDeque;
-import org.ros.concurrent.RetryingExecutorService;
 import org.ros.message.MessageListener;
 import org.ros.namespace.GraphName;
 import org.ros.node.AbstractNodeMain;
@@ -83,8 +79,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
-import com.neocoretechs.relatrix.Relatrix;
-import com.neocoretechs.relatrix.RelatrixTransaction;
 import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
@@ -114,6 +108,8 @@ public class ModelRunner extends AbstractNodeMain {
 	public static final String LLM = "/model";
 	
 	public static CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
+	
+	public static RelatrixLSH relatrixLSH = null;
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -394,6 +390,7 @@ public class ModelRunner extends AbstractNodeMain {
 			//} catch(ExecutionException | InterruptedException ie) {}
 			if(DEBUG)
 				log.info("Relatrix transaction Id:"+xid);
+			relatrixLSH = new RelatrixLSH(dbClient);
 		} catch(IOException ioe) {
 			ioe.printStackTrace();
 		}
@@ -435,14 +432,16 @@ public class ModelRunner extends AbstractNodeMain {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = null;
-		        try(Timer t = Timer.log("GetState")) {
-		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
-		        }
-		        if(promptTokens == null)
-		        	promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
+		        List<Integer> promptTokens = new ArrayList<>();
+		        List<Integer> memoryTokens = new ArrayList<>();
+		        memoryTokens.add(chatFormat.getBeginOfText());
+		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
+		        try {
+					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
+					e.printStackTrace();
+				}
+		        promptTokens.addAll(memoryTokens);
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role USER:"+response.get());
@@ -456,14 +455,16 @@ public class ModelRunner extends AbstractNodeMain {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = null;
-		        try(Timer t = Timer.log("GetState")) {
-		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
-		        }
-		        if(promptTokens == null)
-		        	promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
+		        List<Integer> promptTokens = new ArrayList<>();
+		        List<Integer> memoryTokens = new ArrayList<>();
+		        memoryTokens.add(chatFormat.getBeginOfText());
+		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
+		        try {
+					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
+					e.printStackTrace();
+				}
+		        promptTokens.addAll(memoryTokens);
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role SYSTEM:"+response.get());
@@ -477,14 +478,16 @@ public class ModelRunner extends AbstractNodeMain {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = null;
-		        try(Timer t = Timer.log("GetState")) {
-		        	promptTokens = (List<Integer>)dbClient.get(xid, 0);
-		        }
-		        if(promptTokens == null)
-		        	promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
+		        List<Integer> promptTokens = new ArrayList<>();
+		        List<Integer> memoryTokens = new ArrayList<>();
+		        memoryTokens.add(chatFormat.getBeginOfText());
+		        memoryTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
+		        try {
+					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
+					e.printStackTrace();
+				}
+		        promptTokens.addAll(memoryTokens);
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	//log.info("Queueing from role ASSIST:"+response.get());
@@ -533,8 +536,9 @@ public class ModelRunner extends AbstractNodeMain {
             responseTokens.removeLast();
         }
 		try(Timer t = Timer.log("SaveState")) {
-			dbClient.storekv(xid, 0, responseTokens);
-			dbClient.commit(xid);
+			relatrixLSH.add(responseTokens);
+		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
+			e.printStackTrace();
 		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
@@ -3745,7 +3749,7 @@ final class CosineHash implements Serializable, Comparable {
 	    		randomp[d] = (float)val;
 	    	});
 	    } else {
-	    	for(int d=0; d<dimensions; d++) {
+	    	for(int d=0; d < dimensions; d++) {
 	    		double val = rand.nextGaussian();
 	    		//randomProjection.setFloat(d, (float) val);
 	    		randomp[d] = (float)val;
@@ -3795,7 +3799,7 @@ final class CosineHash implements Serializable, Comparable {
  *
  * A hash function can hash a vector of arbitrary dimensions to an integer
  * representation. The hash function needs to be locality sensitive to work in
- * the locality sensitive hash scheme. Meaning that vectors that are 'close'
+ * the locality sensitive hash scheme, meaning that vectors that are 'close'
  * according to some metric have a high probability to end up with the same
  * hash.<p>
  * In the context of Locality-Sensitive Hashing (LSH), w represents the bucket width or window size.<p>
@@ -3829,14 +3833,11 @@ final class HashTable implements Serializable {
 	private int index;
 	
 	/**
-	 * Initialize a new hash table, it needs a hash family and a number of hash
-	 * functions that should be used.
-	 * 
-	 * @param numberOfHashes
-	 *            The number of hash functions that should be used.
-	 * @param family
-	 *            The hash function family knows how to create new hash
-	 *            functions, and is used therefore.
+	 * Initialize a new hash table, it needs the number of hash
+	 * functions that should be used and projection vector size. Its organized by index up to number of hash tables.
+	 * @param index The projection vector and cosine hash number index.
+	 * @param numberOfHashes The number of hash functions that should be used.
+	 * @param projectionVectorSize The number of elements in the random projection vector
 	 */
 	public HashTable(int index, int numberOfHashes, int projectionVectorSize) {
 		this.index = index;
@@ -3856,9 +3857,8 @@ final class HashTable implements Serializable {
 	 * and does a lookup in the hash table. If no candidates are found, an empty
 	 * list is returned, otherwise, the list of candidates is returned.
 	 * 
-	 * @param query
-	 *            The query vector.
-	 * @return Does a lookup in the table for a query using its hash. If no
+	 * @param query The query vector.
+	 * @return Does a lookup in the tables for a query using its combined hash based on passed tensor. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
 	 *         list of candidates is returned.
 	 */
@@ -3873,7 +3873,7 @@ final class HashTable implements Serializable {
 	}
 
 	/**
-	 * Add a vector to the index.
+	 * Add the vector to the map of hash tables based on key of combined hash generated from passed vector
 	 * @param vector
 	 */
 	public void add(FloatTensor vector) {
@@ -3937,14 +3937,14 @@ final class HashTable implements Serializable {
  * In general, w is a hyperparameter that needs to be tuned for specific applications and datasets. 
  * A good choice of w can significantly impact the performance of the LSH algorithm.<p>
  * This class is designed to be stored in the Relatrix database to serve as a template for encoding and retrieving
- * a given set of floating point tensors.
+ * a given set of floating point tensors.<p>
+ * add(normalize(tokenList));
  * @author Jonathan Groff Copyright (C) NeoCoreTechs 2025
  */
 final class RelatrixLSH implements Serializable, Comparable {
 	private static final Log log = LogFactory.getLog(RelatrixLSH.class);
 	private static final long serialVersionUID = -5410017645908038641L;
 	private static boolean DEBUG = true;
-	public static final int VECTOR_DIMENSION = 50;
 	public int numberOfHashTables = 16;
 	public int numberOfHashes = 12;
 	public AsynchRelatrixClientTransaction dbClient;
@@ -3958,15 +3958,16 @@ final class RelatrixLSH implements Serializable, Comparable {
 	private UUID key;
 	
 	public RelatrixLSH() {}
+	
+	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient) {
+		this(dbClient, 12, 16, 50);
+	}
 	/**
-	 * Initialize a new hash table, it needs a hash family and a number of hash
-	 * functions that should be used.
-	 * 
-	 * @param numberOfHashes
-	 *            The number of hash functions that should be used.
-	 * @param family
-	 *            The hash function family knows how to create new hash
-	 *            functions, and is used therefore.
+	 * Initialize a new hash table, uses COsing hash family.
+	 * @param dbClient the Relatrix client from connected node
+	 * @param numberOfHashes The number of hash functions that should be used.
+	 * @param numberOfhashTables the number of tables each containing number of hashes
+	 * @param projectionVectorSize The number of elements in the vector projected into high dimensional space
 	 */
 	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient, int numberOfHashes, int numberOfHashTables, int projectionVectorSize) {
 		this.dbClient = dbClient;
@@ -3997,11 +3998,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * and does a lookup in the hash table. If no candidates are found, an empty
 	 * list is returned, otherwise, the list of candidates is returned.
 	 * 
-	 * @param query
-	 *            The query vector.
+	 * @param query The query vector.
 	 * @return Does a lookup in the table for a query using its hash. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
-	 *         list of candidates is returned as word, List<FloatTensor>
+	 *         list of candidates is returned as List<Result> where Result contains timetamp, vector
 	 * @throws IOException 
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
@@ -4009,76 +4009,94 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
 	 */
-	public List<Result> query(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	public List<Result> query(List<Integer> query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		ArrayList<Result> res = new ArrayList<Result>();
 		for(int i = 0; i < hashTable.size(); i++) {
-			Integer combinedHash = hash(hashTable.get(i), query);
+			Integer combinedHash = hash(hashTable.get(i), normalize(query));
 			if(DEBUG)
 				log.info("Querying combined hash for query "+i+" of "+hashTable.size()+":"+combinedHash);
 			CompletableFuture<Iterator> cit = dbClient.findSet(xid, combinedHash, '?', '?');
 			Iterator<?> it = cit.get();
-			int cnt = 0;
+			//int cnt = 0;
 			while(it.hasNext()) {
-				res.add((Result) it.next());
+				Result r = (Result) it.next();
+				r.set(1,(Comparable) dbClient.get(xid, r.get(1)));
+				res.add(r);
 				//System.out.print(++cnt+"\r");
 			}
 			//System.out.println();
 		}
 		return res;
 	}
-	public List<Result> queryParallel(FloatTensor query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	/**
+	 * Query the hash table in parallel for a vector. It calculates the hash for the vector,
+	 * and does a lookup in the hash table. If no candidates are found, an empty
+	 * list is returned, otherwise, the list of candidates is returned.
+	 * 
+	 * @param query The query vector.
+	 * @return Does a lookup in the table for a query using its hash. If no
+	 *         candidates are found, an empty list is returned, otherwise, the
+	 *         list of candidates is returned as List<Result> where Result contains timetamp, vector
+	 * @throws IOException 
+	 * @throws IllegalAccessException 
+	 * @throws ClassNotFoundException 
+	 * @throws IllegalArgumentException 
+	 * @throws ExecutionException 
+	 * @throws InterruptedException 
+	 */
+	public List<Result> queryParallel(List<Integer> query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> res = new ArrayList<Result>();
 		ArrayList<Object> iq = new ArrayList<Object>();
 		for(int i = 0; i < hashTable.size(); i++) {
-			Integer combinedHash = hash(hashTable.get(i), query);
+			Integer combinedHash = hash(hashTable.get(i), normalize(query));
 			iq.add(combinedHash);
 		}
         try (var timer = Timer.log("Querying combined hash for table of "+hashTable.size())) {
         	CompletableFuture<List> cres = dbClient.findSetParallel(xid, iq, '?', '?');
         	res = cres.get();
+        	for(Result r: res) {
+        		r.set(1,(Comparable) dbClient.get(xid, r.get(1)));
+        	}
         }
 		return res;
 	}
-
-	public class TokenNormalizer {
-
-		/**
-		 * Normalizes integer tokens into a zero-centered, unit-length float tensor
-		 * for cosine similarity use with Gaussian random projection.
-		 */
-		public static FloatTensor normalize(List<Integer> tokens) {
-			int size = tokens.size();
-			float[] floats = new float[size];
-			// Cast tokens to float and compute mean
-			float mean = 0.0f;
-			for (int i = 0; i < size; i++) {
-				float value = (float) tokens.get(i);
-				floats[i] = value;
-				mean += value;
-			}
-			mean /= size;
-			// Zero-center
-			for (int i = 0; i < size; i++) {
-				floats[i] -= mean;
-			}
-			// Unit-length normalization
-			float norm = 0.0f;
-			for (float f : floats) {
-				norm += f * f;
-			}
-			norm = (float) Math.sqrt(norm);
-			if (norm != 0f) {
-				for (int i = 0; i < size; i++) {
-					floats[i] /= norm;
-				}
-			}
-			return new F32FloatTensor(size, MemorySegment.ofArray(floats));
+	/**
+	 * Normalizes integer tokens into a zero-centered, unit-length float tensor
+	 * for cosine similarity use with Gaussian random projection.
+	 */
+	public static FloatTensor normalize(List<Integer> tokens) {
+		int size = tokens.size();
+		float[] floats = new float[size];
+		// Cast tokens to float and compute mean
+		float mean = 0.0f;
+		for (int i = 0; i < size; i++) {
+			float value = (float) tokens.get(i);
+			floats[i] = value;
+			mean += value;
 		}
+		mean /= size;
+		// Zero-center
+		for (int i = 0; i < size; i++) {
+			floats[i] -= mean;
+		}
+		// Unit-length normalization
+		float norm = 0.0f;
+		for (float f : floats) {
+			norm += f * f;
+		}
+		norm = (float) Math.sqrt(norm);
+		if (norm != 0f) {
+			for (int i = 0; i < size; i++) {
+				floats[i] /= norm;
+			}
+		}
+		return new F32FloatTensor(size, MemorySegment.ofArray(floats));
 	}
 
 	/**
-	 * Add a vector to the index.
-	 * @param vector the embedding of the word
+	 * Add a vector to the index. Create a UUID and store the vector in a K/V datastore, use the UUID to
+	 * reference the vector in the Relatrix relationship.
+	 * @param vector the list of tokens
 	 * @throws DuplicateKeyException 
 	 * @throws IOException 
 	 * @throws ClassNotFoundException 
@@ -4086,14 +4104,48 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
 	 */
-	public void add(FloatTensor vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
+	public void add(List<Integer> vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
+		dbClient.storekv(xid, key, vector);
 		for(int i = 0; i < hashTable.size(); i++) {
-			Integer combinedHash = hash(hashTable.get(i), vector);
-			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), vector);
+			Integer combinedHash = hash(hashTable.get(i), normalize(vector));
+			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), key);
 			res.get();
 		}
+		dbClient.commit(xid);
 	}
-	
+	/**
+	 * Find the nearest candidates using cosine similarity
+	 * @param message trget message in tokens
+	 * @param threshold the cosine similarity threshold (0-1) to retrieve
+	 * @return the list of tokens representing closest candidates
+	 * @throws ExecutionException 
+	 * @throws InterruptedException 
+	 * @throws IOException 
+	 * @throws IllegalAccessException 
+	 * @throws ClassNotFoundException 
+	 * @throws IllegalArgumentException 
+	 */
+	public List<Integer> findNearest(List<Integer> message, double threshold) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+		List<Result> nearest = null;
+		ArrayList<Integer> results = new ArrayList<Integer>();
+		results.addAll(message);
+		FloatTensor fmessage = normalize(message);
+		nearest = queryParallel(message);
+		if(nearest.isEmpty())
+			return results;
+		for(int i = 0; i  < nearest.size(); i++) {
+			List<Integer> restensor = (List<Integer>) nearest.get(i).get(1);
+			FloatTensor cantensor = normalize(restensor);
+			double cosDist = FloatTensor.cosineSimilarity(fmessage, cantensor);
+			int cnt = 0;
+			if(cosDist >= threshold) {
+				results.addAll(restensor);
+				if(DEBUG)
+					log.info(i+" "+(++cnt));
+			}
+		}
+		return results;
+	}
 	/**
 	 * Calculate the combined hash for a vector.
 	 * @param hash one of numberOfHashes
