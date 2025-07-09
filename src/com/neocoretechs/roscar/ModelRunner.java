@@ -4137,19 +4137,22 @@ final class RelatrixLSH implements Serializable, Comparable {
 		results.addAll(message);
 		FloatTensor fmessage = normalize(message);
 		nearest = queryParallel(message);
+		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
 		if(nearest.isEmpty())
 			return results;
+		double[] cossim = new double[nearest.size()];
+		int cnt = 0;
 		for(int i = 0; i  < nearest.size(); i++) {
 			List<Integer> restensor = (List<Integer>) nearest.get(i).get(1);
 			FloatTensor cantensor = normalize(restensor);
 			double cosDist = FloatTensor.cosineSimilarity(fmessage, cantensor);
-			int cnt = 0;
+			cossim[i] = cosDist;
 			if(cosDist >= threshold) {
 				results.addAll(restensor);
-				if(DEBUG)
-					log.info(i+" "+(++cnt));
+				++cnt;
 			}
 		}
+		log.info(cnt+" results above threshold. Similarities:"+Arrays.toString(cossim));
 		return results;
 	}
 	/**
