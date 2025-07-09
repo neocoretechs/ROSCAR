@@ -4143,7 +4143,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
 		for(int i = 0; i  < nearest.size(); i++) {
-			List<Integer> restensor = (List<Integer>) nearest.get(i).get(1);
+			Result result = nearest.get(i);
+			// timestamp at Result.get(0)
+			NoIndex noIndex = (NoIndex) result.get(1);
+			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 			FloatTensor cantensor = normalize(restensor);
 			double cosDist = FloatTensor.cosineSimilarity(fmessage, cantensor);
 			cossim[i] = cosDist;
