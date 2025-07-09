@@ -4111,7 +4111,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 */
 	public void add(List<Integer> vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
 		FloatTensor fvec = normalize(vector);
-		NoIndex noIndex = NoIndex.create(fvec);
+		NoIndex noIndex = NoIndex.create(vector);
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), fvec);
 			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), noIndex);
