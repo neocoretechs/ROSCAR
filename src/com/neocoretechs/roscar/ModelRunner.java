@@ -79,6 +79,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
+import com.neocoretechs.relatrix.key.NoIndex;
 import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
@@ -3775,7 +3776,11 @@ final class CosineHash implements Serializable, Comparable {
 	
 	public int hash(FloatTensor vector) {
 		//calculate the dot product.
-		double result = vector.dot(0,randomProjection,0,randomProjection.size());
+		double result;
+		if(vector.size() < randomProjection.size())
+			result = randomProjection.dot(0, vector, 0, vector.size());
+		else
+			result = vector.dot(0, randomProjection, 0, randomProjection.size());
 		//returns a 'bit' encoded as an integer.
 		//1 when positive or zero, 0 otherwise.
 		return result > 0 ? 1 : 0;
@@ -4001,7 +4006,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @param query The query vector.
 	 * @return Does a lookup in the table for a query using its hash. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
-	 *         list of candidates is returned as List<Result> where Result contains timetamp, vector
+	 *         list of candidates is returned as List<Result> where Result contains timetamp, NoIndex with vector
 	 * @throws IOException 
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
@@ -4020,7 +4025,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 			//int cnt = 0;
 			while(it.hasNext()) {
 				Result r = (Result) it.next();
-				r.set(1,(Comparable) dbClient.get(xid, r.get(1)));
+				// should be NoIndex values
 				res.add(r);
 				//System.out.print(++cnt+"\r");
 			}
@@ -4054,9 +4059,9 @@ final class RelatrixLSH implements Serializable, Comparable {
         try (var timer = Timer.log("Querying combined hash for table of "+hashTable.size())) {
         	CompletableFuture<List> cres = dbClient.findSetParallel(xid, iq, '?', '?');
         	res = cres.get();
-        	for(Result r: res) {
-        		r.set(1,(Comparable) dbClient.get(xid, r.get(1)));
-        	}
+        	//for(Result r: res) {
+        		// should be NoIndex values
+        	//}
         }
 		return res;
 	}
@@ -4105,10 +4110,11 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws InterruptedException 
 	 */
 	public void add(List<Integer> vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
-		dbClient.storekv(xid, key, vector);
+		FloatTensor fvec = normalize(vector);
+		NoIndex noIndex = NoIndex.create(fvec);
 		for(int i = 0; i < hashTable.size(); i++) {
-			Integer combinedHash = hash(hashTable.get(i), normalize(vector));
-			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), key);
+			Integer combinedHash = hash(hashTable.get(i), fvec);
+			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), noIndex);
 			res.get();
 		}
 		dbClient.commit(xid);
