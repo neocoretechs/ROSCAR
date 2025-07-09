@@ -391,12 +391,12 @@ public class ModelRunner extends AbstractNodeMain {
 			//} catch(ExecutionException | InterruptedException ie) {}
 			if(DEBUG)
 				log.info("Relatrix transaction Id:"+xid);
-			relatrixLSH = new RelatrixLSH(dbClient, options.maxTokens());
 		} catch(IOException ioe) {
 			ioe.printStackTrace();
 		}
 		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
 		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
+		relatrixLSH = new RelatrixLSH(dbClient, options.maxTokens());
 		ChatFormatInterface chatFormat;
 
 		try {
