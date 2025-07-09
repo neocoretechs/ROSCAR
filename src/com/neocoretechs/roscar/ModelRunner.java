@@ -391,7 +391,7 @@ public class ModelRunner extends AbstractNodeMain {
 			//} catch(ExecutionException | InterruptedException ie) {}
 			if(DEBUG)
 				log.info("Relatrix transaction Id:"+xid);
-			relatrixLSH = new RelatrixLSH(dbClient);
+			relatrixLSH = new RelatrixLSH(dbClient, options.maxTokens());
 		} catch(IOException ioe) {
 			ioe.printStackTrace();
 		}
@@ -438,7 +438,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        memoryTokens.add(chatFormat.getBeginOfText());
 		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+					memoryTokens = relatrixLSH.findNearest(memoryTokens);
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
@@ -461,7 +461,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        memoryTokens.add(chatFormat.getBeginOfText());
 		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+					memoryTokens = relatrixLSH.findNearest(memoryTokens);
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
@@ -484,7 +484,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        memoryTokens.add(chatFormat.getBeginOfText());
 		        memoryTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens, .5);
+					memoryTokens = relatrixLSH.findNearest(memoryTokens);
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
@@ -3954,6 +3954,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	public int numberOfHashes = 12;
 	public AsynchRelatrixClientTransaction dbClient;
 	private TransactionId xid;
+	private int maxTokens;
 
 	/**
 	 * Contains the mapping between a combination of a number of hashes (encoded
@@ -3964,8 +3965,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 	
 	public RelatrixLSH() {}
 	
-	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient) {
-		this(dbClient, 12, 16, 50);
+	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient, int maxTokens) {
+		this(dbClient, 12, 16, 50, maxTokens);
 	}
 	/**
 	 * Initialize a new hash table, uses COsing hash family.
@@ -3974,12 +3975,13 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @param numberOfhashTables the number of tables each containing number of hashes
 	 * @param projectionVectorSize The number of elements in the vector projected into high dimensional space
 	 */
-	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient, int numberOfHashes, int numberOfHashTables, int projectionVectorSize) {
+	public RelatrixLSH(AsynchRelatrixClientTransaction dbClient, int numberOfHashes, int numberOfHashTables, int projectionVectorSize, int maxTokens) {
 		this.dbClient = dbClient;
 		this.numberOfHashes = numberOfHashes;
 		this.numberOfHashTables = numberOfHashTables;
 		this.key = UUID.randomUUID();
 		this.hashTable = new ArrayList<CosineHash[]>();
+		this.maxTokens = maxTokens;
 		for(int i = 0; i < numberOfHashTables; i++) {
 			final CosineHash[] cHash = new CosineHash[numberOfHashes];
 			this.hashTable.add(cHash);
@@ -3994,6 +3996,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		xid = dbClient.getTransactionId();
 	}
 	
+
 	public UUID getKey() {
 		return key;
 	}
@@ -4122,7 +4125,6 @@ final class RelatrixLSH implements Serializable, Comparable {
 	/**
 	 * Find the nearest candidates using cosine similarity
 	 * @param message trget message in tokens
-	 * @param threshold the cosine similarity threshold (0-1) to retrieve
 	 * @return the list of tokens representing closest candidates
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
@@ -4131,7 +4133,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ClassNotFoundException 
 	 * @throws IllegalArgumentException 
 	 */
-	public List<Integer> findNearest(List<Integer> message, double threshold) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	public List<Integer> findNearest(List<Integer> message) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> nearest = null;
 		ArrayList<Integer> results = new ArrayList<Integer>();
 		results.addAll(message);
@@ -4142,6 +4144,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 			return results;
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
+		TreeMap<Double, Integer> tm = new TreeMap<Double, Integer>();
 		for(int i = 0; i  < nearest.size(); i++) {
 			Result result = nearest.get(i);
 			// timestamp at Result.get(0)
@@ -4150,10 +4153,17 @@ final class RelatrixLSH implements Serializable, Comparable {
 			FloatTensor cantensor = normalize(restensor);
 			double cosDist = FloatTensor.cosineSimilarity(fmessage, cantensor);
 			cossim[i] = cosDist;
-			if(cosDist >= threshold) {
-				results.addAll(restensor);
-				++cnt;
-			}
+			tm.put(cosDist, i);
+		}
+		NavigableMap<Double, Integer> dmap = tm.descendingMap();
+		Iterator<Integer> it = dmap.values().iterator();
+		while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
+			int i = it.next();
+			Result result = nearest.get(i);
+			// timestamp at Result.get(0)
+			NoIndex noIndex = (NoIndex) result.get(1);
+			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+			results.addAll(restensor);
 		}
 		log.info(cnt+" results above threshold. Similarities:"+Arrays.toString(cossim));
 		return results;
