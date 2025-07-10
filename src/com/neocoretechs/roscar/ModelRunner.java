@@ -92,10 +92,10 @@ public class ModelRunner extends AbstractNodeMain {
     private static int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
     public final static boolean DEBUG = false;
     public static boolean DISPLAY_METADATA = false;
-    public static AsynchRelatrixClientTransaction dbClient = null;
+    AsynchRelatrixClientTransaction dbClient = null;
     //static RelatrixTransaction dbClient = null;
-    public static TransactionId xid = null;
-    public static Alias tensorAlias = null;
+    TransactionId xid = null;
+    Alias tensorAlias = null;
     // metadata dump
 	public static BufferedWriter outputStream = null;
 	public static PrintWriter output = null;
@@ -103,14 +103,15 @@ public class ModelRunner extends AbstractNodeMain {
 	Llama model = null;
 	Sampler sampler = null;
 	Options options = null;
+	PromptFrame promptFrame = null;
 	public static final String SYSTEM_PROMPT = "/system_prompt";
 	public static final String USER_PROMPT = "/user_prompt";
 	public static final String ASSIST_PROMPT = "/assist_prompt";
 	public static final String LLM = "/model";
 	
-	public static CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
+	CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
 	
-	public static RelatrixLSH relatrixLSH = null;
+	static RelatrixLSH relatrixLSH = null;
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -387,6 +388,7 @@ public class ModelRunner extends AbstractNodeMain {
 				throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
 			}
 		}
+		promptFrame = new PromptFrame(chatFormat);
 		//
 		// Set up publisher
 		//final Log log = connectedNode.getLog();
@@ -404,18 +406,28 @@ public class ModelRunner extends AbstractNodeMain {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
 		        List<Integer> memoryTokens = new ArrayList<>();
-		        memoryTokens.add(chatFormat.getBeginOfText());
-		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, message.getData())));
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, message.getData());
+		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
+		        promptFrame.setMessage(chatMessage);
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens);
+					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(memoryTokens);
-		        log.info("***Prompt tokens returned:"+ model.tokenizer().decode(memoryTokens));
+		        log.info("***User FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role USER:"+response.get());
+		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, response.get());
+		        	promptFrame.setMessage(chatMessage);
+		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
+		    			relatrixLSH.add(responseTokens);
+		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
+		    			e.printStackTrace();
+		    		}
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -428,17 +440,28 @@ public class ModelRunner extends AbstractNodeMain {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
 		        List<Integer> memoryTokens = new ArrayList<>();
-		        memoryTokens.add(chatFormat.getBeginOfText());
-		        memoryTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData())));
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData());
+		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
+		        promptFrame.setMessage(chatMessage);
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens);
+					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(memoryTokens);
+		        log.info("***System FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	//log.info("Queueing from role SYSTEM:"+response.get());
+		        	log.info("***Queueing from role SYSTEM:"+response.get());
+		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, response.get());
+		        	promptFrame.setMessage(chatMessage);
+		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
+		    			relatrixLSH.add(responseTokens);
+		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
+		    			e.printStackTrace();
+		    		}
 		        	try {
 		        		messageQueue.addLastWait(response.get());
         			} catch(InterruptedException ie) {}
@@ -451,17 +474,28 @@ public class ModelRunner extends AbstractNodeMain {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
 		        List<Integer> memoryTokens = new ArrayList<>();
-		        memoryTokens.add(chatFormat.getBeginOfText());
-		        memoryTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData())));
+		        promptTokens.add(chatFormat.getBeginOfText());
+		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData());
+		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
+		        promptFrame.setMessage(chatMessage);
 		        try {
-					memoryTokens = relatrixLSH.findNearest(memoryTokens);
+					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(memoryTokens);
+		        log.info("***Assistant FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	//log.info("Queueing from role ASSIST:"+response.get());
+		        	log.info("***Queueing from role ASSIST:"+response.get());
+		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+		        	promptFrame.setMessage(chatMessage);
+		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
+		    			relatrixLSH.add(responseTokens);
+		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
+		    			e.printStackTrace();
+		    		}
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -504,13 +538,8 @@ public class ModelRunner extends AbstractNodeMain {
         Set<Integer> stopTokens = chatFormat.getStopTokens();
         List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), null);
         if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
-            //responseTokens.removeLast();
+            responseTokens.removeLast();
         }
-		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
-			relatrixLSH.add(responseTokens);
-		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
-			e.printStackTrace();
-		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
 
@@ -3238,6 +3267,7 @@ final class RoPE {
 }
 
 record Vocabulary(String[] tokens, float[] scores, Map<String, Integer> tokenToIndex) {
+	
     public Vocabulary(String[] vocabulary, float[] scores) {
         this(vocabulary, scores,
                 IntStream.range(0, vocabulary.length)
@@ -3276,7 +3306,6 @@ record Vocabulary(String[] tokens, float[] scores, Map<String, Integer> tokenToI
 @FunctionalInterface
 interface Sampler {
     int sampleToken(FloatTensor logits);
-
     Sampler ARGMAX = FloatTensor::argmax;
 }
 
@@ -3393,7 +3422,36 @@ interface ChatFormatInterface {
 	 public List<Integer> encodeMessage(ChatFormat.Message message);
 	 public List<Integer> encodeDialogPrompt(boolean appendAssistantTurn, List<ChatFormat.Message> dialog);
 	 public int getBeginOfText();
+	 public String stripFormatting(String input);
 }
+
+final class PromptFrame {
+	
+    private final ChatFormatInterface chatFormat;
+    private Collection<? extends Integer> rawTokens;
+    private List<Integer> formattedTokens;
+    
+    public PromptFrame(ChatFormatInterface format) {
+        this.chatFormat = format;
+    }
+    public void setMessage(ChatFormat.Message message) {
+        this.rawTokens = chatFormat.getTokenizer().encode(chatFormat.stripFormatting(message.content()));
+        this.formattedTokens = chatFormat.encodeMessage(message); // Includes headers + role
+    }
+    public Collection<? extends Integer> getRawTokens() {
+        return rawTokens;
+    }
+    public List<Integer> getFormattedTokens() {
+        return formattedTokens;
+    }
+    public int getBeginOfTextToken() {
+        return chatFormat.getBeginOfText();
+    }
+    public Set<Integer> getStopTokens() {
+        return chatFormat.getStopTokens();
+    }
+}
+
 /**
  * Utility tailored for Llama 3 instruct prompt format.
  */
@@ -3460,7 +3518,14 @@ class ChatFormat implements ChatFormatInterface {
         }
         return tokens;
     }
-
+    @Override
+    public String stripFormatting(String input) {
+        return input.replaceAll("<\\|.*?\\|>", "")
+                    .replaceAll("\\*+", "")
+                    .replaceAll("(?m)^USER:|AI:", "")
+                    .trim();
+    }
+    
     public record Message(ChatFormat.Role role, String content) {
     }
 
@@ -3578,6 +3643,16 @@ final class MistralChatFormat implements ChatFormatInterface {
        //}
        tokens.add(endOfText);
        return tokens;
+   }
+   @Override
+   public String stripFormatting(String input) {
+       return input
+           .replaceAll("\\[/?[A-Z_]+\\]", "")
+           .replaceAll("\\[(PREFIX|SUFFIX|MIDDLE)\\]", "")
+           .replaceAll("<\\|.*?\\|>", "")
+           .replaceAll("\\*+", "")
+           .replaceAll("(?m)^USER:|AI:|ASSISTANT:", "")
+           .trim();
    }
 }
 
@@ -4091,7 +4166,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * Find the nearest candidates using cosine similarity. If none are found get the lset timestsamp
 	 * retrieve that vector, then get the other vectors with the LSH index and obtain
 	 * the most relevant.
-	 * @param message target message in tokens
+	 * @param collection target message in tokens
 	 * @return the list of tokens representing closest candidates
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
@@ -4100,12 +4175,11 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ClassNotFoundException 
 	 * @throws IllegalArgumentException 
 	 */
-	public List<Integer> findNearest(List<Integer> message) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	public List<Integer> findNearest(Collection<? extends Integer> collection) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> nearest = null;
-		ArrayList<Integer> results = new ArrayList<Integer>();
-		results.addAll(message);
-		FloatTensor fmessage = normalize(message);
-		nearest = queryParallel(message);
+		ArrayList<Integer> results = new ArrayList<Integer>(collection);
+		FloatTensor fmessage = normalize(results);
+		nearest = queryParallel(results);
 		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
 		if(nearest.isEmpty()) {
 			//return results;
