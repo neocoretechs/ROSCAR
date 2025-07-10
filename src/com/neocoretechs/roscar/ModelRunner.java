@@ -504,9 +504,9 @@ public class ModelRunner extends AbstractNodeMain {
         Set<Integer> stopTokens = chatFormat.getStopTokens();
         List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), null);
         if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
-            responseTokens.removeLast();
+            //responseTokens.removeLast();
         }
-		try(Timer t = Timer.log("SaveState")) {
+		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
 			relatrixLSH.add(responseTokens);
 		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
 			e.printStackTrace();
@@ -4110,17 +4110,19 @@ final class RelatrixLSH implements Serializable, Comparable {
 		if(nearest.isEmpty()) {
 			//return results;
 			List<Result> resByTime = primeByTime();
-			ArrayList<Object> lshQuery = new ArrayList<Object>();
-			for(int i = 0; i < resByTime.size(); i++) {
-				Result result = resByTime.get(i);
-				// LSH at Result.get(0), get(1) has vector as NoIndex
-				NoIndex noIndex = (NoIndex) result.get(1);
-				List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-				results.addAll(restensor);
-				// re-form the nearest list by getting all the LSH for the given timestamp
-				lshQuery.add(result.get(0));
+			if(resByTime != null && !resByTime.isEmpty()) {
+				ArrayList<Object> lshQuery = new ArrayList<Object>();
+				for(int i = 0; i < resByTime.size(); i++) {
+					Result result = resByTime.get(i);
+					// LSH at Result.get(0), get(1) has vector as NoIndex
+					NoIndex noIndex = (NoIndex) result.get(1);
+					List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+					results.addAll(restensor);
+					// re-form the nearest list by getting all the LSH for the given timestamp
+					lshQuery.add(result.get(0));
+				}
+				nearest = queryParallel2(lshQuery);
 			}
-			nearest = queryParallel2(lshQuery);
 			if(nearest == null || nearest.isEmpty())
 				return results;
 		}
@@ -4161,12 +4163,14 @@ final class RelatrixLSH implements Serializable, Comparable {
 	private List<Result> primeByTime() throws InterruptedException, ExecutionException {
 		ArrayList<Result> res = new ArrayList<Result>();
 		Long lastTime = (Long) dbClient.last(xid, Long.class).get();
-		try (var timer = Timer.log("Querying by time "+ LocalDateTime.ofInstant(Instant.ofEpochMilli(lastTime), ZoneId.systemDefault()))) {
-			CompletableFuture<Iterator> cres = dbClient.findSet(xid, '?', lastTime, '?');
-			Iterator<?> it = cres.get();
-			while(it.hasNext()) {
-				// should be LSH index, NoIndex List<Integer> vector values
-				res.add((Result) it.next());
+		if(lastTime != null) {
+			try (var timer = Timer.log("Querying by time "+ LocalDateTime.ofInstant(Instant.ofEpochMilli(lastTime), ZoneId.systemDefault()))) {
+				CompletableFuture<Iterator> cres = dbClient.findSet(xid, '?', lastTime, '?');
+				Iterator<?> it = cres.get();
+				while(it.hasNext()) {
+					// should be LSH index, NoIndex List<Integer> vector values
+					res.add((Result) it.next());
+				}
 			}
 		}
 		return res;
