@@ -36,7 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -252,37 +252,6 @@ public class ModelRunner extends AbstractNodeMain {
     	}
     	return null;
     }
-    /**
-     * Element 0 is command /recallwords
-     * @param query the command line with command keywords
-     * @return the string of question/answer containing keywords
-     */
-    private static String parseKeywords(String[] query) {
-      	if(query == null || query.length < 2)
-    		return null;
-     	StringBuilder sb = new StringBuilder();
-      	/*CompletableFuture<Stream> s = dbClient.findStream(xid, '*', '?', '?');
-      	try {
-      		s.get().forEach(e->{
-      			String s1 = (String)((Result)e).get(0);
-      			for(int i = 1; i < query.length; i++) {
-      				if(s1.contains(query[i])) {
-      					sb.append(s1);
-      					break;
-      				}
-      			}
-      			s1 = (String)((Result)e).get(1);
-      			for(int i = 1; i < query.length; i++) {
-      				if(s1.contains(query[i])) {
-      					sb.append(s1);
-      					break;
-      				}
-      			}
-      		});
-      	} catch(InterruptedException | ExecutionException ie) {}
-      	*/
-      	return sb.toString();
-    }
     
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
                    float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
@@ -443,9 +412,10 @@ public class ModelRunner extends AbstractNodeMain {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(memoryTokens);
+		        log.info("***Prompt tokens returned:"+ model.tokenizer().decode(memoryTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	//log.info("Queueing from role USER:"+response.get());
+		        	log.info("***Queueing from role USER:"+response.get());
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -542,35 +512,6 @@ public class ModelRunner extends AbstractNodeMain {
 			e.printStackTrace();
 		}
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
-	}
-	
-	public static final int HISTORY_DEPTH = 3; // last 3 messages
-	public static List<Integer> buildPrompt(ChatFormatInterface format,
-			List<ChatFormat.Message> recentMessages,
-			FloatTensor queryVec,
-			Llama model,
-			Options options) {
-		List<Integer> promptTokens = new ArrayList<>();
-		// System prompt
-		promptTokens.add(format.getBeginOfText());
-		if (options.systemPrompt() != null) {
-			promptTokens.addAll(format.encodeMessage(new ChatFormat.Message(
-					ChatFormat.Role.SYSTEM, options.systemPrompt())));
-		}
-		// Semantic memory via Relatrix
-		//List<Result> retrieved = MemoryAugmentor.augmentState(queryVec);
-		//for (Result r : retrieved) {
-		//	promptTokens.addAll(format.encodeMessage(new ChatFormat.Message(
-		//			ChatFormat.Role.SYSTEM, "Relevant: " + r.word())));
-		//}
-		// Most recent messages
-		int start = Math.max(0, recentMessages.size() - HISTORY_DEPTH);
-		for (int i = start; i < recentMessages.size(); i++) {
-			promptTokens.addAll(format.encodeMessage(recentMessages.get(i)));
-		}
-		// Assistant header
-		promptTokens.addAll(format.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
-		return promptTokens;
 	}
 
 }
@@ -4037,14 +3978,14 @@ final class RelatrixLSH implements Serializable, Comparable {
 		return res;
 	}
 	/**
-	 * Query the hash table in parallel for a vector. It calculates the hash for the vector,
+	 * Query the hash table in parallel for a vector of tokens. It calculates the hash for the vector,
 	 * and does a lookup in the hash table. If no candidates are found, an empty
 	 * list is returned, otherwise, the list of candidates is returned.
 	 * 
 	 * @param query The query vector.
 	 * @return Does a lookup in the table for a query using its hash. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
-	 *         list of candidates is returned as List<Result> where Result contains timetamp, vector
+	 *         list of candidates is returned as List<Result> where Result contains timestamp, vector
 	 * @throws IOException 
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
@@ -4065,6 +4006,30 @@ final class RelatrixLSH implements Serializable, Comparable {
         	//for(Result r: res) {
         		// should be NoIndex values
         	//}
+        }
+		return res;
+	}
+	/**
+	 * Query the hash table in parallel for a vector of LSH indexes. The query has the indexes,
+	 * and uses these directly to do a lookup. If no candidates are found, an empty
+	 * list is returned, otherwise, the list of candidates is returned.
+	 * 
+	 * @param query The query vector.
+	 * @return Does a lookup in the table for a query using its hash. If no
+	 *         candidates are found, an empty list is returned, otherwise, the
+	 *         list of candidates is returned as List<Result> where Result contains timestamp, vector
+	 * @throws IOException 
+	 * @throws IllegalAccessException 
+	 * @throws ClassNotFoundException 
+	 * @throws IllegalArgumentException 
+	 * @throws ExecutionException 
+	 * @throws InterruptedException 
+	 */
+	public List<Result> queryParallel2(List<Object> query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+		List<Result> res = null;
+        try (var timer = Timer.log("Querying combined hash for List of "+query.size())) {
+        	CompletableFuture<List> cres = dbClient.findSetParallel(xid, query, '?', '?');
+        	res = cres.get();
         }
 		return res;
 	}
@@ -4123,8 +4088,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 		dbClient.commit(xid);
 	}
 	/**
-	 * Find the nearest candidates using cosine similarity
-	 * @param message trget message in tokens
+	 * Find the nearest candidates using cosine similarity. If none are found get the lset timestsamp
+	 * retrieve that vector, then get the other vectors with the LSH index and obtain
+	 * the most relevant.
+	 * @param message target message in tokens
 	 * @return the list of tokens representing closest candidates
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
@@ -4140,12 +4107,27 @@ final class RelatrixLSH implements Serializable, Comparable {
 		FloatTensor fmessage = normalize(message);
 		nearest = queryParallel(message);
 		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
-		if(nearest.isEmpty())
-			return results;
+		if(nearest.isEmpty()) {
+			//return results;
+			List<Result> resByTime = primeByTime();
+			ArrayList<Object> lshQuery = new ArrayList<Object>();
+			for(int i = 0; i < resByTime.size(); i++) {
+				Result result = resByTime.get(i);
+				// LSH at Result.get(0), get(1) has vector as NoIndex
+				NoIndex noIndex = (NoIndex) result.get(1);
+				List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+				results.addAll(restensor);
+				// re-form the nearest list by getting all the LSH for the given timestamp
+				lshQuery.add(result.get(0));
+			}
+			nearest = queryParallel2(lshQuery);
+			if(nearest == null || nearest.isEmpty())
+				return results;
+		}
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
 		TreeMap<Double, Integer> tm = new TreeMap<Double, Integer>();
-		for(int i = 0; i  < nearest.size(); i++) {
+		for(int i = 0; i < nearest.size(); i++) {
 			Result result = nearest.get(i);
 			// timestamp at Result.get(0)
 			NoIndex noIndex = (NoIndex) result.get(1);
@@ -4164,9 +4146,30 @@ final class RelatrixLSH implements Serializable, Comparable {
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 			results.addAll(restensor);
+			++cnt;
 		}
-		log.info(cnt+" results above threshold. Similarities:"+Arrays.toString(cossim));
+		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
 		return results;
+	}
+	/**
+	 * Prime the semantic pump by retrieving last time value, then the relations with that value, later, feed the
+	 * vectors for that time into the prompt, then retrieve any other indexes that match the retrieved indexes.
+	 * @return
+	 * @throws InterruptedException
+	 * @throws ExecutionException
+	 */
+	private List<Result> primeByTime() throws InterruptedException, ExecutionException {
+		ArrayList<Result> res = new ArrayList<Result>();
+		Long lastTime = (Long) dbClient.last(xid, Long.class).get();
+		try (var timer = Timer.log("Querying by time "+ LocalDateTime.ofInstant(Instant.ofEpochMilli(lastTime), ZoneId.systemDefault()))) {
+			CompletableFuture<Iterator> cres = dbClient.findSet(xid, '?', lastTime, '?');
+			Iterator<?> it = cres.get();
+			while(it.hasNext()) {
+				// should be LSH index, NoIndex List<Integer> vector values
+				res.add((Result) it.next());
+			}
+		}
+		return res;
 	}
 	/**
 	 * Calculate the combined hash for a vector.
