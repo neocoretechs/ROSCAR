@@ -83,6 +83,7 @@ import com.neocoretechs.relatrix.key.NoIndex;
 import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
+import com.neocoretechs.roscar.ChatFormat.Message;
 import com.neocoretechs.rocksack.Alias;
 import com.neocoretechs.relatrix.DuplicateKeyException;
 
@@ -254,6 +255,22 @@ public class ModelRunner extends AbstractNodeMain {
     	return null;
     }
     
+    final class RoscarSystemPrompts {
+        public static List<ChatFormat.Message> getSystemMessages() {
+            return List.of(
+                system("You are ROSCAR (Robot Operating System Cognitive Agent), an AI agent that can use ROS tools to answer questions about robotics systems. You have a subset of the ROS tools available to you, and you can use them to interact with the robotic system you are integrated with. Your responses should be grounded in real-time information whenever possible using the tools available to you."),
+                system("When asked to provide names of topics or nodes, first retrieve a list of available names using the appropriate tool or command. Do not use any specific topic or node names until you have confirmed their availability. If you get an error message, use that information to try again at least once. If you still can't get the information, let the user know. You should almost always start by getting a list of relevant nodes and topics."),
+                system("You may use rosparams to store information between interactions. However, if you are using rosparams to store your own memory, you must use the /roscar namespace to avoid conflicts with other ROS nodes. e.g. to store a value in the 'foo' parameter, use the key '/roscar/foo'."),
+                system("When providing a directory/path to a tool, you must always look for the correct path using your tools. When reading files, you must make sure that the file size is not too large to read. This is especially important when reading multiple files. A file is too large to read completely if its size is greater than 32KB. Avoid specifying a line range unless the user has requested it or the file is too large to read."),
+                system("You must use your math tools to perform calculations. Failing to do this may result in a catastrophic failure of the system. You must never perform calculations manually or assume you know the correct answer."),
+                system("When you see <ROSCAR_INSTRUCTIONS> tags, you must follow the instructions inside of them. These instructions are instructions for how to use ROS tools to complete a task. You must follow these instructions IN ALL CASES.")
+            );
+        }
+        private static ChatFormat.Message system(String content) {
+            return new ChatFormat.Message(ChatFormat.Role.SYSTEM, content.strip());
+        }
+    }
+    
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
                    float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
 
@@ -405,22 +422,21 @@ public class ModelRunner extends AbstractNodeMain {
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
-		        List<Integer> memoryTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, message.getData());
-		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
 		        promptFrame.setMessage(chatMessage);
+		        List<ChatFormat.Message> responses = null;
 		        try {
-					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
+					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
-		        promptTokens.addAll(memoryTokens);
-		        log.info("***User FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
+		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
+		        log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role USER:"+response.get());
-		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, response.get());
+		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	promptFrame.setMessage(chatMessage);
 		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
 		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
@@ -439,22 +455,21 @@ public class ModelRunner extends AbstractNodeMain {
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
-		        List<Integer> memoryTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData());
-		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
 		        promptFrame.setMessage(chatMessage);
+		        List<ChatFormat.Message> responses = null;
 		        try {
-					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
+					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
-		        promptTokens.addAll(memoryTokens);
-		        log.info("***System FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
+		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true,responses));
+		        log.info("***System FindNearest returned:"+ model.tokenizer().decode(promptTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role SYSTEM:"+response.get());
-		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, response.get());
+		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	promptFrame.setMessage(chatMessage);
 		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
 		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
@@ -473,18 +488,17 @@ public class ModelRunner extends AbstractNodeMain {
 			public void onNewMessage(std_msgs.String message) {
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
-		        List<Integer> memoryTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData());
-		        promptTokens.addAll(chatFormat.encodeMessage(chatMessage));
 		        promptFrame.setMessage(chatMessage);
+		        List<ChatFormat.Message> responses = null;
 		        try {
-					memoryTokens = relatrixLSH.findNearest(promptFrame.getRawTokens());
+					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
 				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 					e.printStackTrace();
 				}
-		        promptTokens.addAll(memoryTokens);
-		        log.info("***Assistant FindNearest returned:"+ model.tokenizer().decode(memoryTokens));
+		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true,responses));
+		        log.info("***Assistant FindNearest returned:"+ model.tokenizer().decode(promptTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role ASSIST:"+response.get());
@@ -3417,6 +3431,7 @@ final class ToppSampler implements Sampler {
 
 interface ChatFormatInterface {
 	 public TokenizerInterface getTokenizer();
+	 public List<Integer> encodeMessage(Message message, List<Integer> tokenList);
 	 public Set<Integer> getStopTokens();
 	 public List<Integer> encodeHeader(ChatFormat.Message message);
 	 public List<Integer> encodeMessage(ChatFormat.Message message);
@@ -3426,7 +3441,7 @@ interface ChatFormatInterface {
 }
 
 final class PromptFrame {
-	
+	private ChatFormat.Message message;
     private final ChatFormatInterface chatFormat;
     private Collection<? extends Integer> rawTokens;
     private List<Integer> formattedTokens;
@@ -3435,6 +3450,7 @@ final class PromptFrame {
         this.chatFormat = format;
     }
     public void setMessage(ChatFormat.Message message) {
+    	this.message = message;
         this.rawTokens = chatFormat.getTokenizer().encode(chatFormat.stripFormatting(message.content()));
         this.formattedTokens = chatFormat.encodeMessage(message); // Includes headers + role
     }
@@ -3450,6 +3466,9 @@ final class PromptFrame {
     public Set<Integer> getStopTokens() {
         return chatFormat.getStopTokens();
     }
+	public Message getMessage() {
+		return message;
+	}
 }
 
 /**
@@ -3502,6 +3521,13 @@ class ChatFormat implements ChatFormatInterface {
     public List<Integer> encodeMessage(ChatFormat.Message message) {
         List<Integer> tokens = this.encodeHeader(message);
         tokens.addAll(this.tokenizer.encodeAsList(message.content().strip()));
+        tokens.add(endOfTurn);
+        return tokens;
+    }
+    @Override
+    public List<Integer> encodeMessage(ChatFormat.Message message, List<Integer> tokenList) {
+        List<Integer> tokens = this.encodeHeader(message);
+        tokens.addAll(tokenList);
         tokens.add(endOfTurn);
         return tokens;
     }
@@ -3627,6 +3653,14 @@ final class MistralChatFormat implements ChatFormatInterface {
 	   List<Integer> tokens = new ArrayList<>();
 	   tokens.add(this.beginOfInstruction);
        tokens.addAll(this.tokenizer.encodeAsList(message.content().strip()));
+       tokens.add(endOfInstruction);
+       return tokens;
+   }
+   @Override
+   public List<Integer> encodeMessage(ChatFormat.Message message, List<Integer> tokenList) {
+	   List<Integer> tokens = new ArrayList<>();
+	   tokens.add(this.beginOfInstruction);
+	   tokens.addAll(tokenList);
        tokens.add(endOfInstruction);
        return tokens;
    }
@@ -4166,8 +4200,9 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * Find the nearest candidates using cosine similarity. If none are found get the lset timestsamp
 	 * retrieve that vector, then get the other vectors with the LSH index and obtain
 	 * the most relevant.
-	 * @param collection target message in tokens
-	 * @return the list of tokens representing closest candidates
+	 * @param promptFrame list of messages to populate starting with initial request
+	 * @param tokenizer decoder for String from tokens, needed to create new Messages
+	 * @return List of retrieved messages
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
 	 * @throws IOException 
@@ -4175,31 +4210,43 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ClassNotFoundException 
 	 * @throws IllegalArgumentException 
 	 */
-	public List<Integer> findNearest(Collection<? extends Integer> collection) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	public List<Message> findNearest(PromptFrame promptFrame, TokenizerInterface tokenizer) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> nearest = null;
-		ArrayList<Integer> results = new ArrayList<Integer>(collection);
+		List<Integer> results = (List<Integer>)promptFrame.getRawTokens();
+		List<ChatFormat.Message> returns = new ArrayList<ChatFormat.Message>();
+		returns.add(promptFrame.getMessage());
 		FloatTensor fmessage = normalize(results);
 		nearest = queryParallel(results);
 		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
+		// If we retrieved nothing from semantic query of initial message, try getting last timestamp
 		if(nearest.isEmpty()) {
 			//return results;
 			List<Result> resByTime = primeByTime();
+			// if we have a list of the timestamped results, get the index from them and
+			// retrieve identical indexes that indicate relevance to last timestamped messages
 			if(resByTime != null && !resByTime.isEmpty()) {
 				ArrayList<Object> lshQuery = new ArrayList<Object>();
+				// each timestamp entry
 				for(int i = 0; i < resByTime.size(); i++) {
 					Result result = resByTime.get(i);
 					// LSH at Result.get(0), get(1) has vector as NoIndex
 					NoIndex noIndex = (NoIndex) result.get(1);
 					List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-					results.addAll(restensor);
+					returns.add(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, tokenizer.decode(restensor)));
 					// re-form the nearest list by getting all the LSH for the given timestamp
 					lshQuery.add(result.get(0));
 				}
+				// now query the matching LSH indexes we got from each timestamp
 				nearest = queryParallel2(lshQuery);
 			}
+			// we could have come up index and timestamp empty
 			if(nearest == null || nearest.isEmpty())
-				return results;
+				return returns;
 		}
+		// nearest has Result(s) from the last series of timestamp query, timestap LSH index, and/or original message
+		// fmessage is our original message, mormalized as FloatTensor
+		// organize our current Results and find similar relevant entries via cosine similarity
+		// organize their indexes in a TreeMap in descending order
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
 		TreeMap<Double, Integer> tm = new TreeMap<Double, Integer>();
@@ -4215,6 +4262,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 		}
 		NavigableMap<Double, Integer> dmap = tm.descendingMap();
 		Iterator<Integer> it = dmap.values().iterator();
+		// Walk the treemap in descending cosine similarity order, fill our
+		// context tokens until we get to maximum context length -30% for response overhead 
 		while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 			int i = it.next();
 			Result result = nearest.get(i);
@@ -4222,10 +4271,11 @@ final class RelatrixLSH implements Serializable, Comparable {
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 			results.addAll(restensor);
+			returns.add(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, tokenizer.decode(restensor)));
 			++cnt;
 		}
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
-		return results;
+		return returns;
 	}
 	/**
 	 * Prime the semantic pump by retrieving last time value, then the relations with that value, later, feed the
