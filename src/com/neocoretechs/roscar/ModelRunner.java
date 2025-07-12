@@ -413,7 +413,7 @@ public class ModelRunner extends AbstractNodeMain {
 		// Subscribers
 		Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
 		Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
-		Subscriber<std_msgs.String> subsassist = connectedNode.newSubscriber(ASSIST_PROMPT, std_msgs.String._TYPE);
+	
 		//
 		// set up subscriber callback
 		//
@@ -425,6 +425,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, message.getData());
 		        promptFrame.setMessage(chatMessage);
+		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
 		        List<ChatFormat.Message> responses = null;
 		        try {
 					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
@@ -439,8 +440,11 @@ public class ModelRunner extends AbstractNodeMain {
 		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	promptFrame.setMessage(chatMessage);
 		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.ASSISTANT);
 		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
-		    			relatrixLSH.add(responseTokens);
+		    			relatrixLSH.add(tr, responseTokens);
+		    			tr.setRole(ChatFormat.Role.USER); // maintain timestamp
+		    			relatrixLSH.add(tr, userMessage);
 		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
 		    			e.printStackTrace();
 		    		}
@@ -458,6 +462,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        promptTokens.add(chatFormat.getBeginOfText());
 		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData());
 		        promptFrame.setMessage(chatMessage);
+		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
 		        List<ChatFormat.Message> responses = null;
 		        try {
 					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
@@ -472,8 +477,11 @@ public class ModelRunner extends AbstractNodeMain {
 		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	promptFrame.setMessage(chatMessage);
 		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.SYSTEM);
 		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
-		    			relatrixLSH.add(responseTokens);
+		    			relatrixLSH.add(tr, responseTokens);
+		    			tr.setRole(ChatFormat.Role.SYSTEM); // maintain timestamp
+		    			relatrixLSH.add(tr, userMessage);
 		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
 		    			e.printStackTrace();
 		    		}
@@ -483,40 +491,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        }
 			}
 		});
-		subsassist.addMessageListener(new MessageListener<std_msgs.String>() {
-			@Override
-			public void onNewMessage(std_msgs.String message) {
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, message.getData());
-		        promptFrame.setMessage(chatMessage);
-		        List<ChatFormat.Message> responses = null;
-		        try {
-					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
-				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
-					e.printStackTrace();
-				}
-		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true,responses));
-		        log.info("***Assistant FindNearest returned:"+ model.tokenizer().decode(promptTokens));
-		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent()) {
-		        	log.info("***Queueing from role ASSIST:"+response.get());
-		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-		        	promptFrame.setMessage(chatMessage);
-		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
-		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
-		    			relatrixLSH.add(responseTokens);
-		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
-		    			e.printStackTrace();
-		    		}
-		        	try {
-		        		messageQueue.addLastWait(response.get());
-		        	} catch(InterruptedException ie) {}
-		        }
-			}
-		});
-		
+	
 		/**
 		 * Main publishing loop. Essentially we are publishing the data in whatever state its in, using the
 		 * mutex appropriate to establish critical sections. A sleep follows each publication to keep the bus arbitrated
@@ -3428,6 +3403,54 @@ final class ToppSampler implements Sampler {
         return indices[lastIndex]; // in case of rounding errors
     }
 }
+/**
+ * Serves as morphism map for relating LSH index to token vector
+ */
+class TimestampRole implements Serializable, Comparable {
+	private static final long serialVersionUID = 1L;
+	private Long timestamp;
+	private ChatFormat.Role role;
+	public TimestampRole() {}
+	public TimestampRole(Long timestamp, ChatFormat.Role role) {
+		this.timestamp = timestamp;
+		this.role= role;
+	}
+	public Long getTimestamp() {
+		return timestamp;
+	}
+	public void setTimestamp(Long timestamp) {
+		this.timestamp = timestamp;
+	}
+	public ChatFormat.Role getRole() {
+		return role;
+	}
+	public void setRole(ChatFormat.Role role) {
+		this.role = role;
+	}
+	@Override
+	public int hashCode() {
+		return Objects.hash(role, timestamp);
+	}
+	@Override
+	public boolean equals(Object obj) {
+		if (this == obj) {
+			return true;
+		}
+		if (!(obj instanceof TimestampRole)) {
+			return false;
+		}
+		TimestampRole other = (TimestampRole) obj;
+		return role == other.role && Objects.equals(timestamp, other.timestamp);
+	}
+	@Override
+	public int compareTo(Object o) {
+		int res;
+		res = timestamp.compareTo(((TimestampRole)o).timestamp);
+		if(res != 0)
+			return res;
+		return role.compareTo(((TimestampRole)o).role);
+	}	
+}
 
 interface ChatFormatInterface {
 	 public TokenizerInterface getTokenizer();
@@ -3555,14 +3578,20 @@ class ChatFormat implements ChatFormatInterface {
     public record Message(ChatFormat.Role role, String content) {
     }
 
-    public record Role(String name) {
-        public static ChatFormat.Role SYSTEM = new ChatFormat.Role("system");
-        public static ChatFormat.Role USER = new ChatFormat.Role("user");
-        public static ChatFormat.Role ASSISTANT = new ChatFormat.Role("assistant");
-
+    public enum Role {
+        SYSTEM("system"),
+        USER("user"),
+        ASSISTANT("assistant");
+    	private final String role;
+    	Role(String role) {
+    		this.role = role;
+    	}
+    	public String getRole() {
+    		return role;
+    	}
         @Override
         public String toString() {
-            return name;
+            return role;
         }
     }
 }
@@ -4092,9 +4121,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * list is returned, otherwise, the list of candidates is returned.
 	 * 
 	 * @param query The query vector.
+	 * @param normalizedQuery TODO
 	 * @return Does a lookup in the table for a query using its hash. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
-	 *         list of candidates is returned as List<Result> where Result contains timestamp, vector
+	 *         list of candidates is returned as List<Result> where Result contains TimestampRole, vector
 	 * @throws IOException 
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
@@ -4102,11 +4132,11 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
 	 */
-	public List<Result> queryParallel(List<Integer> query) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
+	public List<Result> queryParallel(List<Integer> query, FloatTensor normalizedQuery) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> res = new ArrayList<Result>();
 		ArrayList<Object> iq = new ArrayList<Object>();
 		for(int i = 0; i < hashTable.size(); i++) {
-			Integer combinedHash = hash(hashTable.get(i), normalize(query));
+			Integer combinedHash = hash(hashTable.get(i), normalizedQuery);
 			iq.add(combinedHash);
 		}
         try (var timer = Timer.log("Querying combined hash for table of "+hashTable.size())) {
@@ -4126,7 +4156,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @param query The query vector.
 	 * @return Does a lookup in the table for a query using its hash. If no
 	 *         candidates are found, an empty list is returned, otherwise, the
-	 *         list of candidates is returned as List<Result> where Result contains timestamp, vector
+	 *         list of candidates is returned as List<Result> where Result contains TimestampRole, vector
 	 * @throws IOException 
 	 * @throws IllegalAccessException 
 	 * @throws ClassNotFoundException 
@@ -4178,6 +4208,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	/**
 	 * Add a vector to the index. Create a UUID and store the vector in a K/V datastore, use the UUID to
 	 * reference the vector in the Relatrix relationship.
+	 * @param timestampRole The map of the morphism to store LSH->TimestampRole->NoIndex key contains timestamp and role
 	 * @param vector the list of tokens
 	 * @throws DuplicateKeyException 
 	 * @throws IOException 
@@ -4186,12 +4217,12 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ExecutionException 
 	 * @throws InterruptedException 
 	 */
-	public void add(List<Integer> vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
+	public void add(TimestampRole timestampRole, List<Integer> vector) throws IllegalAccessException, ClassNotFoundException, IOException, InterruptedException, ExecutionException {
 		FloatTensor fvec = normalize(vector);
 		NoIndex noIndex = NoIndex.create(vector);
 		for(int i = 0; i < hashTable.size(); i++) {
 			Integer combinedHash = hash(hashTable.get(i), fvec);
-			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, System.currentTimeMillis(), noIndex);
+			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, timestampRole, noIndex);
 			res.get();
 		}
 		dbClient.commit(xid);
@@ -4216,7 +4247,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		List<ChatFormat.Message> returns = new ArrayList<ChatFormat.Message>();
 		returns.add(promptFrame.getMessage());
 		FloatTensor fmessage = normalize(results);
-		nearest = queryParallel(results);
+		nearest = queryParallel(results, fmessage);
 		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
 		// If we retrieved nothing from semantic query of initial message, try getting last timestamp
 		if(nearest.isEmpty()) {
@@ -4229,10 +4260,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 				// each timestamp entry
 				for(int i = 0; i < resByTime.size(); i++) {
 					Result result = resByTime.get(i);
-					// LSH at Result.get(0), get(1) has vector as NoIndex
-					NoIndex noIndex = (NoIndex) result.get(1);
-					List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-					returns.add(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, tokenizer.decode(restensor)));
+					// LSH at Result.get(0)
 					// re-form the nearest list by getting all the LSH for the given timestamp
 					lshQuery.add(result.get(0));
 				}
@@ -4243,16 +4271,16 @@ final class RelatrixLSH implements Serializable, Comparable {
 			if(nearest == null || nearest.isEmpty())
 				return returns;
 		}
-		// nearest has Result(s) from the last series of timestamp query, timestap LSH index, and/or original message
+		// nearest has Result(s) from the last series of TimestampRole query, TimestampRole LSH index, and/or original message
 		// fmessage is our original message, mormalized as FloatTensor
 		// organize our current Results and find similar relevant entries via cosine similarity
-		// organize their indexes in a TreeMap in descending order
+		// organize their indexes in a TreeMap in descending order of cosDist, index in Result
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
 		TreeMap<Double, Integer> tm = new TreeMap<Double, Integer>();
 		for(int i = 0; i < nearest.size(); i++) {
 			Result result = nearest.get(i);
-			// timestamp at Result.get(0)
+			// TimestampRole at Result.get(0)
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 			FloatTensor cantensor = normalize(restensor);
@@ -4261,35 +4289,126 @@ final class RelatrixLSH implements Serializable, Comparable {
 			tm.put(cosDist, i);
 		}
 		NavigableMap<Double, Integer> dmap = tm.descendingMap();
+		// Now we need another TreeMap with the entries in TimestampRole descending order. As we
+		// walk the cosine tree we check the timestamp tree for proper order of time/role
+		// and if we dont see the order we superimpose it for that entry in the returns
+		TreeMap<TimestampRole, Integer> tr = new TreeMap<TimestampRole, Integer>();
+		for(int i = 0; i < nearest.size(); i++) {
+			Result result = nearest.get(i);
+			TimestampRole trr = (TimestampRole) result.get(0);
+			tr.put(trr, i);
+		}
+		// tr is sorted by timestamp ASSISTANT, timestamp SYSTEM, timestamp USER timestamp ascending
+		// Walk the TreeMap in descending cosine similarity order, fill our
+		// context tokens until we get to maximum context length -30% for response overhead.
+		// At each entry, check the role and retrieve the proper counterpart; If assistant, 
+		// get user with same timestamp if it wasnt the previous entry. if user, get assistant
+		// with same timestamp if its not the next entry. In essence we want question/answer pairs
+		// that are relevant. If we are missing an answer, get it, if we are missing a question, get that
+		// if one of the pairs was picked for semantic relevance and the other wasnt.
+		// We have the entries retrieved via sematic relevance or recent timestamp in these TreeMaps.
+		// One we walk in order of cosine descending, the other we have sorted by TimestampRole that we
+		// check if we see an out of order pair, and if that map doesnt have the missing pair member we need
+		// with our sorted check; TimestampRole key being either higherEntry or lowerEntry, we go out
+		// to the database and get it by constructing a TimestampRole with same timestamp, complimentary role,
+		// insert it to results, and up our context token count toward max.
 		Iterator<Integer> it = dmap.values().iterator();
-		// Walk the treemap in descending cosine similarity order, fill our
-		// context tokens until we get to maximum context length -30% for response overhead 
+		boolean wasUser = true;
 		while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 			int i = it.next();
 			Result result = nearest.get(i);
-			// timestamp at Result.get(0)
-			NoIndex noIndex = (NoIndex) result.get(1);
-			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-			results.addAll(restensor);
-			returns.add(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, tokenizer.decode(restensor)));
+			TimestampRole trr =  (TimestampRole) result.get(0);
+			if(trr.getRole().equals(ChatFormat.Role.ASSISTANT)) {
+				if(!wasUser) {
+					Map.Entry<TimestampRole, Integer> trn = tr.higherEntry(trr); // system or user same timestamp?
+					if(trn != null && (trn.getKey().getTimestamp() == trr.getTimestamp())) { 		
+						if(trn.getKey().getRole() == ChatFormat.Role.USER) {
+							Result result2 = nearest.get(trn.getValue()); // index to nearest list
+							addRetrievedMessage(result2, results, returns, tokenizer);
+						} else {
+							if(trn.getKey().getRole() == ChatFormat.Role.SYSTEM) {
+								trn = tr.higherEntry(tr.higherKey(trr));
+								if(trn != null && trn.getKey().getRole() == ChatFormat.Role.USER) {
+									Result result2 = nearest.get(trn.getValue()); // index to nearest list
+									addRetrievedMessage(result2, results, returns, tokenizer);
+								} else {
+									getTimestampRole(results, returns, trr, tokenizer);
+								}
+							} else {
+								getTimestampRole(results, returns, trr, tokenizer);
+							}
+						}
+					} else {
+						getTimestampRole(results, returns, trr, tokenizer);
+					}
+				} else {
+					wasUser = false; // fall through
+				}
+			} else {
+				if(trr.getRole().equals(ChatFormat.Role.USER)) {
+					if(wasUser) { // 2 users
+						Map.Entry<TimestampRole, Integer> trn = tr.lowerEntry(trr); // system or assistant same timestamp?
+						if(trn != null && (trn.getKey().getTimestamp() == trr.getTimestamp())) {
+							if(trn.getKey().getRole() == ChatFormat.Role.ASSISTANT) {
+								Result result2 = nearest.get(trn.getValue()); // index to nearest list
+								addRetrievedMessage(result2, results, returns, tokenizer);
+							} else {
+								if(trn.getKey().getRole() == ChatFormat.Role.SYSTEM) {
+									trn = tr.lowerEntry(tr.lowerKey(trr)); 
+									// lower key of user is assistant same timestamp?
+									if(trn != null && trn.getKey().getRole() == ChatFormat.Role.ASSISTANT) {
+										Result result2 = nearest.get(trn.getValue()); // index to nearest list
+										addRetrievedMessage(result2, results, returns, tokenizer);
+									} else {
+										getTimestampRole(results, returns, trr, tokenizer);
+									}
+								} else {
+									getTimestampRole(results, returns, trr, tokenizer);
+								}
+							}					
+						} else {
+							getTimestampRole(results, returns, trr, tokenizer);
+						}
+					} else {
+						wasUser = false;
+					}
+				}
+			}
+			addRetrievedMessage(result, results, returns, tokenizer);
 			++cnt;
 		}
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
 		return returns;
 	}
+	
+	private void addRetrievedMessage(Result result, List<Integer> results, List<Message> returns, TokenizerInterface tokenizer) {
+		NoIndex noIndex = (NoIndex) result.get(1);
+		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+		results.addAll(restensor); // to keep track of max context size
+		returns.add(new ChatFormat.Message(((TimestampRole)result.get(0)).getRole(), tokenizer.decode(restensor)));
+	}
+	
+	private void getTimestampRole(List<Integer> results, List<Message> returns, TimestampRole trr, TokenizerInterface tokenizer) throws InterruptedException, ExecutionException {
+		CompletableFuture<Stream> cit = dbClient.findStream(xid, "*", trr, "?");
+		cit.get().forEach(e->{
+			addRetrievedMessage((Result)e, results, returns, tokenizer);
+		});	
+	}
+
 	/**
 	 * Prime the semantic pump by retrieving last time value, then the relations with that value, later, feed the
 	 * vectors for that time into the prompt, then retrieve any other indexes that match the retrieved indexes.
-	 * @return
+	 * So should pick up at least the 2 indexes for a USER/ASSISTANT request/response for a given timestamp
+	 * @return The Results with index at element 0
 	 * @throws InterruptedException
 	 * @throws ExecutionException
 	 */
 	private List<Result> primeByTime() throws InterruptedException, ExecutionException {
 		ArrayList<Result> res = new ArrayList<Result>();
-		Long lastTime = (Long) dbClient.last(xid, Long.class).get();
+		TimestampRole lastTime = (TimestampRole) dbClient.last(xid, TimestampRole.class).get();
 		if(lastTime != null) {
-			try (var timer = Timer.log("Querying by time "+ LocalDateTime.ofInstant(Instant.ofEpochMilli(lastTime), ZoneId.systemDefault()))) {
-				CompletableFuture<Iterator> cres = dbClient.findSet(xid, '?', lastTime, '?');
+			try (var timer = Timer.log("Querying by time "+ LocalDateTime.ofInstant(Instant.ofEpochMilli(lastTime.getTimestamp()), ZoneId.systemDefault()))) {
+				CompletableFuture<Iterator> cres = dbClient.findSet(xid, '?', lastTime, '*');
 				Iterator<?> it = cres.get();
 				while(it.hasNext()) {
 					// should be LSH index, NoIndex List<Integer> vector values
@@ -4297,6 +4416,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 				}
 			}
 		}
+		log.info("primeByTime returned "+res.size()+" results.");
 		return res;
 	}
 	/**
