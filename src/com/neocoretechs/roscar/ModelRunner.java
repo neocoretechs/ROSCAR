@@ -437,11 +437,12 @@ public class ModelRunner extends AbstractNodeMain {
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role USER:"+response.get());
-		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-		        	promptFrame.setMessage(chatMessage);
-		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
+		        	responseFrame.setMessage(responseMessage);
+		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
 		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.ASSISTANT);
-		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
+		    		try(Timer t = Timer.log("SaveState of user:"+responseTokens.size()+" "+tr.toString())) {
 		    			relatrixLSH.add(tr, responseTokens);
 		    			tr.setRole(ChatFormat.Role.USER); // maintain timestamp
 		    			relatrixLSH.add(tr, userMessage);
@@ -474,11 +475,12 @@ public class ModelRunner extends AbstractNodeMain {
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
 		        	log.info("***Queueing from role SYSTEM:"+response.get());
-		        	chatMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-		        	promptFrame.setMessage(chatMessage);
-		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
+		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
+		        	responseFrame.setMessage(responseMessage);
+		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
 		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.SYSTEM);
-		    		try(Timer t = Timer.log("SaveState of user:"+userMessage.size()+" response:"+responseTokens.size())) {
+		    		try(Timer t = Timer.log("SaveState of system:"+userMessage.size()+" response:"+responseTokens.size()+" "+tr.toString())) {
 		    			relatrixLSH.add(tr, responseTokens);
 		    			tr.setRole(ChatFormat.Role.SYSTEM); // maintain timestamp
 		    			relatrixLSH.add(tr, userMessage);
