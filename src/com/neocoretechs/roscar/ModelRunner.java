@@ -4282,8 +4282,12 @@ final class RelatrixLSH implements Serializable, Comparable {
 				nearest = queryParallel2(lshQuery);
 			}
 			// we could have come up index and timestamp empty
-			if(nearest == null || nearest.isEmpty())
+			if(nearest == null || nearest.isEmpty()) {
+				// put most recent user query last
+				returns.add(promptFrame.getMessage());
+				log.info("Returning from empty index and timestamp query with original prompt");
 				return returns;
+			}
 		}
 		// nearest has Result(s) from the last series of TimestampRole query, TimestampRole LSH index, and/or original message
 		// fmessage is our original message, mormalized as FloatTensor
