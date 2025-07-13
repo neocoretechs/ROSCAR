@@ -4452,7 +4452,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 		//cit.get().forEach(e->{
 		CompletableFuture<Iterator> cit = dbClient.findSet(xid, '*', trr, '?');
 		Iterator<?> it = cit.get();
-		while(it.hasNext()) {
+		// get one instance
+		if(it.hasNext()) {
 			log.info("getTimeStampRole result");
 			//addRetrievedMessage((Result)e, trr, results, returns, tokenizer);
 			addRetrievedMessage((Result)it.next(), trr, results, returns, tokenizer);
