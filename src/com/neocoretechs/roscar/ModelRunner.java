@@ -4286,6 +4286,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		// nearest has Result(s) from the last series of TimestampRole query, TimestampRole LSH index, and/or original message
 		// fmessage is our original message, mormalized as FloatTensor
 		// organize our current Results and find similar relevant entries via cosine similarity
+		// and theta similarity
 		// organize their indexes in a TreeMap in descending order of cosDist, index in Result
 		double[] cossim = new double[nearest.size()];
 		int cnt = 0;
@@ -4302,10 +4303,10 @@ final class RelatrixLSH implements Serializable, Comparable {
 				cosDist = fmessage.dot(0, cantensor, 0, cantensor.size());
 			else
 				cosDist = cantensor.dot(0, fmessage, 0, fmessage.size());
+			cosDist = Math.acos(cosDist); // radians
 			cossim[i] = cosDist;
 			tm.put(cosDist, i);
 		}
-		NavigableMap<Double, Integer> dmap = tm.descendingMap();
 		// Now we need another TreeMap with the entries in TimestampRole descending order. As we
 		// walk the cosine tree we check the timestamp tree for proper order of time/role
 		// and if we dont see the order we superimpose it for that entry in the returns
@@ -4316,7 +4317,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 			tr.put(trr, i);
 		}
 		// tr is sorted by timestamp ASSISTANT, timestamp SYSTEM, timestamp USER timestamp ascending
-		// Walk the TreeMap in descending cosine similarity order, fill our
+		// Walk the TreeMap in ascending theta similarity order, fill our
 		// context tokens until we get to maximum context length -30% for response overhead.
 		// At each entry, check the role and retrieve the proper counterpart; If assistant, 
 		// get user with same timestamp if it wasnt the previous entry. if user, get assistant
@@ -4324,12 +4325,12 @@ final class RelatrixLSH implements Serializable, Comparable {
 		// that are relevant. If we are missing an answer, get it, if we are missing a question, get that
 		// if one of the pairs was picked for semantic relevance and the other wasnt.
 		// We have the entries retrieved via sematic relevance or recent timestamp in these TreeMaps.
-		// One we walk in order of cosine descending, the other we have sorted by TimestampRole that we
+		// One we walk in order of theta ascending, the other we have sorted by TimestampRole that we
 		// check if we see an out of order pair, and if that map doesnt have the missing pair member we need
 		// with our sorted check; TimestampRole key being either higherEntry or lowerEntry, we go out
 		// to the database and get it by constructing a TimestampRole with same timestamp, complimentary role,
 		// insert it to results, and up our context token count toward max.
-		Iterator<Integer> it = dmap.values().iterator();
+		Iterator<Integer> it = tm.values().iterator();
 		boolean wasUser = true;
 		while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 			int i = it.next();
@@ -4466,41 +4467,6 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 */
 	public int getNumberOfHashes() {
 		return hashTable.get(0).length;
-	}
-
-	/**
-     * Verifies semantic integrity of a list of token vectors.
-     * Flags highly similar yet directionally divergent vector pairs.
-     * The formula is dot product of unit vectors divided by absolute value of product
-     * of magnitudes.
-     * We are calculating dot product of normalized unit vectors, so magnitude is already
-     * 1, so dividing by absolute value of product of magnitudes is merely dividing by 1*1, so we skip that step
-     * Assume our list are normalized from previous cosine similarity check<p>
-     * Example: if(verify(contextVectors, 0.3, 0.95)) injectIntoContext(contextVectors) <br>
-	 * @param contextVectors normalized FloatTensor List
-	 * @param angleThreshold threshold of theta angle
-	 * @param similarityFloor
-	 * @return
-	 */
-	public static boolean verify(List<FloatTensor> contextVectors, double angleThreshold, double similarityFloor) {
-		for (int i = 0; i < contextVectors.size(); i++) {
-			FloatTensor vecA = contextVectors.get(i);
-			for (int j = i + 1; j < contextVectors.size(); j++) {
-				FloatTensor vecB = contextVectors.get(j);
-				double cosine;
-				if(vecA.size() < vecB.size())
-					cosine = vecB.dot(0, vecA, 0, vecA.size());
-				else
-					cosine = vecA.dot(0, vecB, 0, vecB.size());
-				cosine = Math.max(-1.0, Math.min(1.0, cosine)); // clamp for safety
-				double angle = Math.acos(cosine); // radians
-				if (cosine > similarityFloor && angle > angleThreshold) {
-					log.warn(String.format("Semantic drift detected between vector %d and %d | CosSim: %.6f | Angle: %.6f radians", i, j, cosine, angle));      
-					return false;
-				}
-			}
-		}
-		return true;
 	}
 
 	@Override
