@@ -4259,7 +4259,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		List<Integer> results = (List<Integer>)promptFrame.getRawTokens();
 		log.info("User query has "+results.size()+" tokens");
 		List<ChatFormat.Message> returns = new ArrayList<ChatFormat.Message>();
-		returns.add(promptFrame.getMessage());
+
 		FloatTensor fmessage = normalize(results);
 		nearest = queryParallel(results, fmessage);
 		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
@@ -4333,7 +4333,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		// to the database and get it by constructing a TimestampRole with same timestamp, complimentary role,
 		// insert it to results, and up our context token count toward max.
 		Iterator<Integer> it = tm.values().iterator();
-		boolean wasUser = true;
+		boolean wasUser = false; // we need a user first, our user query that initiated this interaction goes in last
 		while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 			int i = it.next();
 			Result result = nearest.get(i);
@@ -4404,6 +4404,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 			++cnt;
 		}
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
+		// put most recent user query last
+		returns.add(promptFrame.getMessage());
 		return returns;
 	}
 	/**
