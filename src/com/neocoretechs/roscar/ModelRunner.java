@@ -478,7 +478,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        	promptFrame.setMessage(chatMessage);
 		        	List<Integer> responseTokens = (List<Integer>)promptFrame.getRawTokens();
 		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.SYSTEM);
-		    		try(Timer t = Timer.log("SaveState of "+responseTokens.size())) {
+		    		try(Timer t = Timer.log("SaveState of user:"+userMessage.size()+" response:"+responseTokens.size())) {
 		    			relatrixLSH.add(tr, responseTokens);
 		    			tr.setRole(ChatFormat.Role.SYSTEM); // maintain timestamp
 		    			relatrixLSH.add(tr, userMessage);
@@ -2440,7 +2440,12 @@ abstract class FloatTensor implements Externalizable, Comparable {
         }
         return this;
     }
-    
+    /**
+     * Performs normalization of 2 tensors, then does dot product and divides by product of magnitude
+     * @param a tensor a
+     * @param b tensor b
+     * @return the cosine similarity of the 2
+     */
     static float cosineSimilarity(FloatTensor a, FloatTensor b) {
     	float dotProduct = a.dot(0, b, 0, a.size());
     	DoubleAdder aNormAdder = new DoubleAdder();
@@ -3413,7 +3418,7 @@ class TimestampRole implements Serializable, Comparable {
 	public TimestampRole() {}
 	public TimestampRole(Long timestamp, ChatFormat.Role role) {
 		this.timestamp = timestamp;
-		this.role= role;
+		this.role = role;
 	}
 	public Long getTimestamp() {
 		return timestamp;
@@ -3441,6 +3446,10 @@ class TimestampRole implements Serializable, Comparable {
 		}
 		TimestampRole other = (TimestampRole) obj;
 		return role == other.role && Objects.equals(timestamp, other.timestamp);
+	}
+	@Override
+	public String toString() {
+		return LocalDateTime.ofInstant(Instant.ofEpochMilli(timestamp), ZoneId.systemDefault()).toString()+" "+role.getRole();
 	}
 	@Override
 	public int compareTo(Object o) {
@@ -4175,6 +4184,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 	/**
 	 * Normalizes integer tokens into a zero-centered, unit-length float tensor
 	 * for cosine similarity use with Gaussian random projection.
+	 * @param tokens List of tokenized values
+	 * @return FloatTensor normalized to unit length zero-centered mean
 	 */
 	public static FloatTensor normalize(List<Integer> tokens) {
 		int size = tokens.size();
@@ -4244,6 +4255,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 	public List<Message> findNearest(PromptFrame promptFrame, TokenizerInterface tokenizer) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> nearest = null;
 		List<Integer> results = (List<Integer>)promptFrame.getRawTokens();
+		log.info("User query has "+results.size()+" tokens");
 		List<ChatFormat.Message> returns = new ArrayList<ChatFormat.Message>();
 		returns.add(promptFrame.getMessage());
 		FloatTensor fmessage = normalize(results);
@@ -4283,8 +4295,13 @@ final class RelatrixLSH implements Serializable, Comparable {
 			// TimestampRole at Result.get(0)
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+			log.info("retrieved dialog has "+restensor.size()+" tokens");
+			double cosDist;
 			FloatTensor cantensor = normalize(restensor);
-			double cosDist = FloatTensor.cosineSimilarity(fmessage, cantensor);
+			if(cantensor.size() < fmessage.size())
+				cosDist = fmessage.dot(0, cantensor, 0, cantensor.size());
+			else
+				cosDist = cantensor.dot(0, fmessage, 0, fmessage.size());
 			cossim[i] = cosDist;
 			tm.put(cosDist, i);
 		}
@@ -4440,6 +4457,40 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 */
 	public int getNumberOfHashes() {
 		return hashTable.get(0).length;
+	}
+
+	/**
+     * Verifies semantic integrity of a list of token vectors.
+     * Flags highly similar yet directionally divergent vector pairs.
+     * The formula is dot product of unit vectors divided by absolute value of product
+     * of magnitudes.
+     * We are calculating dot product of normalized unit vectors, so magnitude is already
+     * 1, so dividing by absolute value of product of magnitudes is merely dividing by 1*1, so we skip that step
+     * Assume our list are normalized from previous cosine similarity check
+	 * @param contextVectors normalized FloatTensor List
+	 * @param angleThreshold threshold of theta angle
+	 * @param similarityFloor
+	 * @return
+	 */
+	public static boolean verify(List<FloatTensor> contextVectors, double angleThreshold, double similarityFloor) {
+		for (int i = 0; i < contextVectors.size(); i++) {
+			FloatTensor vecA = contextVectors.get(i);
+			for (int j = i + 1; j < contextVectors.size(); j++) {
+				FloatTensor vecB = contextVectors.get(j);
+				double cosine;
+				if(vecA.size() < vecB.size())
+					cosine = vecB.dot(0, vecA, 0, vecA.size());
+				else
+					cosine = vecA.dot(0, vecB, 0, vecB.size());
+				cosine = Math.max(-1.0, Math.min(1.0, cosine)); // clamp for safety
+				double angle = Math.acos(cosine); // radians
+				if (cosine > similarityFloor && angle > angleThreshold) {
+					log.warn(String.format("Semantic drift detected between vector %d and %d | CosSim: %.6f | Angle: %.6f radians", i, j, cosine, angle));      
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	@Override
