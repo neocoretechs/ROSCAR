@@ -4406,7 +4406,14 @@ final class RelatrixLSH implements Serializable, Comparable {
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
 		return returns;
 	}
-	
+	/**
+	 * Add the retrieved Result of 0 - TimestampRole 1 - NoIndex vector of List<Integer> to returns list
+	 * as ChatFormat.Message
+	 * @param result
+	 * @param results
+	 * @param returns
+	 * @param tokenizer
+	 */
 	private void addRetrievedMessage(Result result, List<Integer> results, List<Message> returns, TokenizerInterface tokenizer) {
 		NoIndex noIndex = (NoIndex) result.get(1);
 		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
@@ -4414,17 +4421,41 @@ final class RelatrixLSH implements Serializable, Comparable {
 		log.info("addRetrievedMessage:"+(TimestampRole)result.get(0));
 		returns.add(new ChatFormat.Message(((TimestampRole)result.get(0)).getRole(), tokenizer.decode(restensor)));
 	}
-	
+	/**
+	 * Permutation for existing TimestampRole, Result 0 - NoIndex vector
+	 * add List<Integer> to returns list as ChatFormat.Message
+	 * @param result
+	 * @param trr
+	 * @param results
+	 * @param returns
+	 * @param tokenizer
+	 */
+	private void addRetrievedMessage(Result result, TimestampRole trr, List<Integer> results, List<Message> returns, TokenizerInterface tokenizer) {
+		NoIndex noIndex = (NoIndex) result.get(0);
+		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
+		results.addAll(restensor); // to keep track of max context size
+		log.info("addRetrievedMessage:"+trr);
+		returns.add(new ChatFormat.Message(trr.getRole(), tokenizer.decode(restensor)));
+	}
+	/**
+	 * Get the NoIndex vector of List<Integer> for existing TimestampRole
+	 * @param results
+	 * @param returns
+	 * @param trr
+	 * @param tokenizer
+	 * @throws InterruptedException
+	 * @throws ExecutionException
+	 */
 	private void getTimestampRole(List<Integer> results, List<Message> returns, TimestampRole trr, TokenizerInterface tokenizer) throws InterruptedException, ExecutionException {
 		log.info("getTimestampRole for "+trr);
-		//CompletableFuture<Stream> cit = dbClient.findStream(xid, "*", trr, "?");
+		//CompletableFuture<Stream> cit = dbClient.findStream(xid, '*', trr, '?');
 		//cit.get().forEach(e->{
 		CompletableFuture<Iterator> cit = dbClient.findSet(xid, '*', trr, '?');
 		Iterator<?> it = cit.get();
 		while(it.hasNext()) {
 			log.info("getTimeStampRole result");
-			//addRetrievedMessage((Result)e, results, returns, tokenizer);
-			addRetrievedMessage((Result)it.next(), results, returns, tokenizer);
+			//addRetrievedMessage((Result)e, trr, results, returns, tokenizer);
+			addRetrievedMessage((Result)it.next(), trr, results, returns, tokenizer);
 		//});
 		}
 	}
