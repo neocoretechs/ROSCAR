@@ -4349,14 +4349,17 @@ final class RelatrixLSH implements Serializable, Comparable {
 									Result result2 = nearest.get(trn.getValue()); // index to nearest list
 									addRetrievedMessage(result2, results, returns, tokenizer);
 								} else {
-									getTimestampRole(results, returns, trr, tokenizer);
+									TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.USER);
+									getTimestampRole(results, returns, tr2, tokenizer);
 								}
 							} else {
-								getTimestampRole(results, returns, trr, tokenizer);
+								TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.USER);
+								getTimestampRole(results, returns, tr2, tokenizer);
 							}
 						}
 					} else {
-						getTimestampRole(results, returns, trr, tokenizer);
+						TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.USER);
+						getTimestampRole(results, returns, tr2, tokenizer);
 					}
 				} else {
 					wasUser = false; // fall through
@@ -4377,14 +4380,17 @@ final class RelatrixLSH implements Serializable, Comparable {
 										Result result2 = nearest.get(trn.getValue()); // index to nearest list
 										addRetrievedMessage(result2, results, returns, tokenizer);
 									} else {
-										getTimestampRole(results, returns, trr, tokenizer);
+										TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.ASSISTANT);
+										getTimestampRole(results, returns, tr2, tokenizer);
 									}
 								} else {
-									getTimestampRole(results, returns, trr, tokenizer);
+									TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.ASSISTANT);
+									getTimestampRole(results, returns, tr2, tokenizer);
 								}
 							}					
 						} else {
-							getTimestampRole(results, returns, trr, tokenizer);
+							TimestampRole tr2 = new TimestampRole(trr.getTimestamp(), ChatFormat.Role.ASSISTANT);
+							getTimestampRole(results, returns, tr2, tokenizer);
 						}
 					} else {
 						wasUser = false;
@@ -4402,12 +4408,15 @@ final class RelatrixLSH implements Serializable, Comparable {
 		NoIndex noIndex = (NoIndex) result.get(1);
 		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 		results.addAll(restensor); // to keep track of max context size
+		log.info("addRetrievedMessage:"+(TimestampRole)result.get(0));
 		returns.add(new ChatFormat.Message(((TimestampRole)result.get(0)).getRole(), tokenizer.decode(restensor)));
 	}
 	
 	private void getTimestampRole(List<Integer> results, List<Message> returns, TimestampRole trr, TokenizerInterface tokenizer) throws InterruptedException, ExecutionException {
+		log.info("getTimestampRole for "+trr);
 		CompletableFuture<Stream> cit = dbClient.findStream(xid, "*", trr, "?");
 		cit.get().forEach(e->{
+			log.info("getTimeStampRole result");
 			addRetrievedMessage((Result)e, results, returns, tokenizer);
 		});	
 	}
@@ -4466,7 +4475,8 @@ final class RelatrixLSH implements Serializable, Comparable {
      * of magnitudes.
      * We are calculating dot product of normalized unit vectors, so magnitude is already
      * 1, so dividing by absolute value of product of magnitudes is merely dividing by 1*1, so we skip that step
-     * Assume our list are normalized from previous cosine similarity check
+     * Assume our list are normalized from previous cosine similarity check<p>
+     * Example: if(verify(contextVectors, 0.3, 0.95)) injectIntoContext(contextVectors) <br>
 	 * @param contextVectors normalized FloatTensor List
 	 * @param angleThreshold threshold of theta angle
 	 * @param similarityFloor
