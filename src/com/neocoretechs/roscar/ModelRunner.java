@@ -4417,11 +4417,16 @@ final class RelatrixLSH implements Serializable, Comparable {
 	
 	private void getTimestampRole(List<Integer> results, List<Message> returns, TimestampRole trr, TokenizerInterface tokenizer) throws InterruptedException, ExecutionException {
 		log.info("getTimestampRole for "+trr);
-		CompletableFuture<Stream> cit = dbClient.findStream(xid, "*", trr, "?");
-		cit.get().forEach(e->{
+		//CompletableFuture<Stream> cit = dbClient.findStream(xid, "*", trr, "?");
+		//cit.get().forEach(e->{
+		CompletableFuture<Iterator> cit = dbClient.findSet(xid, '*', trr, '?');
+		Iterator<?> it = cit.get();
+		while(it.hasNext()) {
 			log.info("getTimeStampRole result");
-			addRetrievedMessage((Result)e, results, returns, tokenizer);
-		});	
+			//addRetrievedMessage((Result)e, results, returns, tokenizer);
+			addRetrievedMessage((Result)it.next(), results, returns, tokenizer);
+		//});
+		}
 	}
 
 	/**
