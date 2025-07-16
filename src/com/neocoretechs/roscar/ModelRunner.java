@@ -4400,7 +4400,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 							getTimestampRole(results, returns, tr2, tokenizer);
 						}
 					} else {
-						wasUser = false;
+						wasUser = true;
 					}
 				}
 			}
