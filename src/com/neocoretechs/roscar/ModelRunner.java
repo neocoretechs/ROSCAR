@@ -255,7 +255,7 @@ public class ModelRunner extends AbstractNodeMain {
     	return null;
     }
     
-    final class RoscarSystemPrompts {
+    final class ROSCARSystemPrompts {
         public static List<ChatFormat.Message> getSystemMessages() {
             return List.of(
                 system("You are ROSCAR (Robot Operating System Cognitive Agent), an AI agent that can use ROS tools to answer questions about robotics systems. You have a subset of the ROS tools available to you, and you can use them to interact with the robotic system you are integrated with. Your responses should be grounded in real-time information whenever possible using the tools available to you."),
@@ -405,7 +405,25 @@ public class ModelRunner extends AbstractNodeMain {
 				throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
 			}
 		}
+		// set up the preamble system directives
 		promptFrame = new PromptFrame(chatFormat);
+        List<Integer> promptTokens = new ArrayList<>();
+        promptTokens.add(chatFormat.getBeginOfText());
+		List<ChatFormat.Message> prompts = ROSCARSystemPrompts.getSystemMessages();
+		Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+		promptTokens.addAll(chatFormat.encodeDialogPrompt(true, prompts));
+		Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
+        if(response.isPresent()) {
+        	log.info("***Queueing from system preamble:"+response.get());
+        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+        	PromptFrame responseFrame = new PromptFrame(chatFormat);
+        	responseFrame.setMessage(responseMessage);
+        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
+    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.SYSTEM, promptTokens, responseTokens);
+        	try {
+        		messageQueue.addLastWait(response.get());
+			} catch(InterruptedException ie) {}
+        }
 		//
 		// Set up publisher
 		//final Log log = connectedNode.getLog();
@@ -441,14 +459,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
 		        	responseFrame.setMessage(responseMessage);
 		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.ASSISTANT);
-		    		try(Timer t = Timer.log("SaveState of user:"+responseTokens.size()+" "+tr.toString())) {
-		    			relatrixLSH.add(tr, responseTokens);
-		    			tr.setRole(ChatFormat.Role.USER); // maintain timestamp
-		    			relatrixLSH.add(tr, userMessage);
-		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
-		    			e.printStackTrace();
-		    		}
+		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.USER, userMessage, responseTokens);
 		        	try {
 		        		messageQueue.addLastWait(response.get());
 		        	} catch(InterruptedException ie) {}
@@ -479,14 +490,7 @@ public class ModelRunner extends AbstractNodeMain {
 		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
 		        	responseFrame.setMessage(responseMessage);
 		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-		        	TimestampRole tr = new TimestampRole(System.currentTimeMillis(), ChatFormat.Role.SYSTEM);
-		    		try(Timer t = Timer.log("SaveState of system:"+userMessage.size()+" response:"+responseTokens.size()+" "+tr.toString())) {
-		    			relatrixLSH.add(tr, responseTokens);
-		    			tr.setRole(ChatFormat.Role.SYSTEM); // maintain timestamp
-		    			relatrixLSH.add(tr, userMessage);
-		    		} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
-		    			e.printStackTrace();
-		    		}
+		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.SYSTEM, userMessage, responseTokens);
 		        	try {
 		        		messageQueue.addLastWait(response.get());
         			} catch(InterruptedException ie) {}
@@ -4217,7 +4221,28 @@ final class RelatrixLSH implements Serializable, Comparable {
 		}
 		return new F32FloatTensor(size, MemorySegment.ofArray(floats));
 	}
-
+	/**
+	 * Add the user/assistant interaction
+	 * @param ts the timestamp
+	 * @param initiator the initiator of the interaction; either USER or SYSTEM
+	 * @param userMessage tokenized initiator message
+	 * @param responseTokens tokenized response
+	 */
+	public void addInteraction(Long ts, ChatFormat.Role initiator, List<Integer> userMessage, List<Integer> responseTokens) {
+		TimestampRole tr_assistant = new TimestampRole(ts, ChatFormat.Role.ASSISTANT);
+		TimestampRole tr_user = new TimestampRole(ts, initiator);
+		try(Timer t = Timer.log("SaveState of reponse:"+responseTokens.size()+" initiator:"+tr_user.toString())) {
+			try {
+				add(tr_user, userMessage);
+				add(tr_assistant, responseTokens);
+			} catch (IllegalAccessException | ClassNotFoundException | IOException | InterruptedException | ExecutionException e) {
+				log.error(e);
+				dbClient.rollback(xid);
+				return;
+			}
+			dbClient.commit(xid); // Only after both store ops succeed
+		}
+	}	
 	/**
 	 * Add a vector to the index. Create a UUID and store the vector in a K/V datastore, use the UUID to
 	 * reference the vector in the Relatrix relationship.
@@ -4238,7 +4263,6 @@ final class RelatrixLSH implements Serializable, Comparable {
 			CompletableFuture<Relation> res = dbClient.store(xid, combinedHash, timestampRole, noIndex);
 			res.get();
 		}
-		dbClient.commit(xid);
 	}
 	/**
 	 * Find the nearest candidates using cosine similarity. If none are found get the lset timestsamp
