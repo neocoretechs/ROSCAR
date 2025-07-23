@@ -14,8 +14,11 @@ package com.neocoretechs.roscar;
 
 import jdk.incubator.vector.*;
 
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.Externalizable;
+import java.io.File;
+import java.io.FileReader;
 import java.io.Serializable;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -259,9 +262,7 @@ public class ModelRunner extends AbstractNodeMain {
     final class ROSCARSystemPrompts {
         public static List<ChatFormat.Message> getSystemMessages() {
             return List.of(
-                system("You are ROSCAR (Robot Operating System Cognitive Agent), an AI agent that can use ROS tools to answer questions about robotics systems. You have a subset of the ROS tools available to you, and you can use them to interact with the robotic system you are integrated with. Your responses should be grounded in real-time information whenever possible using the tools available to you."),
-                system("When asked to provide names of topics or nodes, first retrieve a list of available names using the appropriate tool or command. Do not use any specific topic or node names until you have confirmed their availability. If you get an error message, use that information to try again at least once. If you still can't get the information, let the user know. You should almost always start by getting a list of relevant nodes and topics."),
-                system("You may use rosparams to store information between interactions. However, if you are using rosparams to store your own memory, you must use the /roscar namespace to avoid conflicts with other ROS nodes. e.g. to store a value in the 'foo' parameter, use the key '/roscar/foo'."),
+                system("You are ROSCAR (Robot Operating System Cognitive Agent), rather than writing code, you will interact with RosJavaLite in a more direct way. You will be built into the system as a node, and you will see messages from the bus appear as directives much as a human interacting in a chat. You will then issue your own directives as responses. You will act as the brain for the robot and your nervous system will be the message bus integrated as an interactive system."),
                 system("When providing a directory/path to a tool, you must always look for the correct path using your tools. When reading files, you must make sure that the file size is not too large to read. This is especially important when reading multiple files. A file is too large to read completely if its size is greater than 32KB. Avoid specifying a line range unless the user has requested it or the file is too large to read."),
                 system("You must use your math tools to perform calculations. Failing to do this may result in a catastrophic failure of the system. You must never perform calculations manually or assume you know the correct answer."),
                 system("When you see <ROSCAR_INSTRUCTIONS> tags, you must follow the instructions inside of them. These instructions are instructions for how to use ROS tools to complete a task. You must follow these instructions IN ALL CASES.")
@@ -270,10 +271,30 @@ public class ModelRunner extends AbstractNodeMain {
         public static ChatFormat.Message system(String content) {
             return new ChatFormat.Message(ChatFormat.Role.SYSTEM, content.strip());
         }
+        public static void frontloadDb(RelatrixLSH db, ChatFormatInterface chatFormat, String fileName) throws IOException {
+            try (BufferedReader reader = new BufferedReader(new FileReader(fileName))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    // Parse fields: timestamp | role | prompt | response
+                    String[] parts = line.split("\\|");
+                    Long ts = Long.parseLong(parts[0].trim());
+                    Role role = Role.valueOf(parts[1].trim().toUpperCase());
+                    String prompt = parts[2].trim();
+                    String response = parts[3].trim();
+                    ChatFormat.Message cProm = new ChatFormat.Message(role, prompt);
+                    ChatFormat.Message cResp = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response);
+                    PromptFrame pf1 = new PromptFrame(chatFormat);
+                    pf1.setMessage(cProm);
+                    PromptFrame pf2 = new PromptFrame(chatFormat);
+                    pf2.setMessage(cResp);
+                    db.addInteraction(ts, role, (List<Integer>)pf1.getRawTokens(), (List<Integer>)pf2.getRawTokens());
+                }
+            }
+        }
     }
     
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
-                   float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
+                   float temperature, float topp, long seed, int maxTokens, boolean preload, boolean echo) {
 
         static final int DEFAULT_MAX_TOKENS = 512;
 
@@ -301,6 +322,7 @@ public class ModelRunner extends AbstractNodeMain {
             "  --seed <long>                 random seed, default System.nanoTime()\r\n"+
             "  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS+"\r\n"+
             "  --echo <boolean>              print ALL tokens to stderr, if true, default false\r\n"+
+            "  --preload <boolean>           use the path to model file with .txt extension as context database preload\r\n"+
             "  --metadata                    write metadata file of <model file>.metadata\r\n\r\n"+
             "Examples:\r\n"+
             " --system-prompt \"Reply concisely, in French\"\r\n"+
@@ -317,7 +339,7 @@ public class ModelRunner extends AbstractNodeMain {
             // Keep max context length small for low-memory devices.
             int maxTokens = DEFAULT_MAX_TOKENS;
             boolean interactive = false;
-            boolean stream = true;
+            boolean preload = false;
             boolean echo = false;
 
             for (int i = 0; i < args.length; i++) {
@@ -349,13 +371,14 @@ public class ModelRunner extends AbstractNodeMain {
                             case "--seed", "-s" -> seed = Long.parseLong(nextArg);
                             case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
                             case "--echo" -> echo = Boolean.parseBoolean(nextArg);
+                            case "--preload" -> preload = Boolean.parseBoolean(nextArg);
                             case "--metadata" -> DISPLAY_METADATA = true;
                             default -> require(false, "Unknown option: %s", optionName);
                         }
                     }
                 }
             }
-            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, stream, echo);
+            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, preload, echo);
         }
     }
     
@@ -427,6 +450,17 @@ public class ModelRunner extends AbstractNodeMain {
         	try {
         		messageQueue.addLastWait(response.get());
 			} catch(InterruptedException ie) {}
+        }
+        // See if we preload DB with interactions
+        if(options.preload()) {
+			try {
+				String fileName = options.modelPath.getFileName().toString();
+		        int dotIndex = fileName.lastIndexOf('.');     
+		        fileName = (dotIndex == -1) ? fileName : fileName.substring(0, dotIndex);
+				ROSCARSystemPrompts.frontloadDb(relatrixLSH, chatFormat, fileName+".txt");
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
         }
 		//
 		// Set up publisher
