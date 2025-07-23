@@ -384,9 +384,11 @@ public class ModelRunner extends AbstractNodeMain {
 		}
 		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
 		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
-		relatrixLSH = new RelatrixLSH(dbClient, options.maxTokens());
 		ChatFormatInterface chatFormat;
-
+		//
+		// NOTE: dont use options.maxTokens() from here on out, as the value may be -1 indicating metadata
+		// contextLength is used for maximum context size. Instead make sure to use model.configuration().contextLength
+		//
 		try {
 			model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
 			if(model == null)
@@ -395,6 +397,7 @@ public class ModelRunner extends AbstractNodeMain {
 			log.error("Could not load model " + options.modelPath.toString()+e);
 			System.exit(1);
 		}
+		relatrixLSH = new RelatrixLSH(dbClient, model.configuration().contextLength);
 		sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
 		// Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
 		if(ModelLoader.name.equals("mistral")) {
@@ -532,7 +535,7 @@ public class ModelRunner extends AbstractNodeMain {
 
 	public static Optional<String> processMessage(Llama model, Options options, Sampler sampler, Llama.State state, ChatFormatInterface chatFormat, List<Integer> promptTokens ) {
         Set<Integer> stopTokens = chatFormat.getStopTokens();
-        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), null);
+        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, model.configuration().contextLength, sampler, options.echo(), null);
         if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
             responseTokens.removeLast();
         }
@@ -1659,9 +1662,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
                                                IntConsumer onTokenGenerated) {
         long startNanos = System.nanoTime();
         long startGen = 0;
-        if (maxTokens < 0 || model.configuration().contextLength < maxTokens) {
-            maxTokens = model.configuration().contextLength;
-        }
+ 
         List<Integer> generatedTokens = new ArrayList<>(maxTokens);
         int token = state.latestToken; // BOS?
         int nextToken;
@@ -4451,6 +4452,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
 		// if no interactions played out, lets build a system level series of responses with what we have
 		if(cnt == 0) {
+			log.info(tm.values().size()+" context entries, current results:"+results.size()+" max:"+(maxTokens - (((float)maxTokens) * .3)));
 			it = tm.values().iterator();
 			while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 				int i = it.next();
