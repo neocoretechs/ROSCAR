@@ -84,6 +84,7 @@ import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
 import com.neocoretechs.roscar.ChatFormat.Message;
+import com.neocoretechs.roscar.ChatFormat.Role;
 import com.neocoretechs.rocksack.Alias;
 import com.neocoretechs.relatrix.DuplicateKeyException;
 
@@ -266,7 +267,7 @@ public class ModelRunner extends AbstractNodeMain {
                 system("When you see <ROSCAR_INSTRUCTIONS> tags, you must follow the instructions inside of them. These instructions are instructions for how to use ROS tools to complete a task. You must follow these instructions IN ALL CASES.")
             );
         }
-        private static ChatFormat.Message system(String content) {
+        public static ChatFormat.Message system(String content) {
             return new ChatFormat.Message(ChatFormat.Role.SYSTEM, content.strip());
         }
     }
@@ -3466,18 +3467,28 @@ class TimestampRole implements Serializable, Comparable {
 		return role.compareTo(((TimestampRole)o).role);
 	}	
 }
-
+/**
+ * Contract for all ChatFormat tokenizers
+ */
 interface ChatFormatInterface {
 	 public TokenizerInterface getTokenizer();
 	 public List<Integer> encodeMessage(Message message, List<Integer> tokenList);
 	 public Set<Integer> getStopTokens();
 	 public List<Integer> encodeHeader(ChatFormat.Message message);
 	 public List<Integer> encodeMessage(ChatFormat.Message message);
+	 /**
+	  * Encode beginOfText, then follow with list of supplied messages
+	  * @param appendAssistantTurn true to add a blank ASSISTANT header at the end of the list of prompts
+	  * @param dialog List of messages to tokenize
+	  * @return the tokenized list of appended messages
+	  */
 	 public List<Integer> encodeDialogPrompt(boolean appendAssistantTurn, List<ChatFormat.Message> dialog);
 	 public int getBeginOfText();
 	 public String stripFormatting(String input);
 }
-
+/**
+ * Encapsulates ChatFormatInterface tokenizer and manages raw and formatted token lists
+ */
 final class PromptFrame {
 	private ChatFormat.Message message;
     private final ChatFormatInterface chatFormat;
@@ -3569,6 +3580,12 @@ class ChatFormat implements ChatFormatInterface {
         tokens.add(endOfTurn);
         return tokens;
     }
+    /**
+     * Encode beginOfText, then follow with list of supplied messages
+     * @param appendAssistantTurn true to add a blank ASSISTANT header at the end of the list of prompts
+     * @param dialog List of messages to tokenize
+     * @return the tokenized list of appended messages
+     */
     @Override
     public List<Integer> encodeDialogPrompt(boolean appendAssistantTurn, List<ChatFormat.Message> dialog) {
         List<Integer> tokens = new ArrayList<>();
@@ -3594,9 +3611,9 @@ class ChatFormat implements ChatFormatInterface {
     }
 
     public enum Role {
-        SYSTEM("system"),
-        USER("user"),
-        ASSISTANT("assistant");
+        SYSTEM("SYSTEM"),
+        USER("USER"),
+        ASSISTANT("ASSISTANT");
     	private final String role;
     	Role(String role) {
     		this.role = role;
@@ -4326,7 +4343,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 			// TimestampRole at Result.get(0)
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-			log.info("retrieved dialog has "+restensor.size()+" tokens");
+			log.info("retrieved dialog:"+result.get(0)+" "+tokenizer.decode(restensor));
 			double cosDist;
 			FloatTensor cantensor = normalize(restensor);
 			if(cantensor.size() < fmessage.size())
@@ -4432,6 +4449,17 @@ final class RelatrixLSH implements Serializable, Comparable {
 			++cnt;
 		}
 		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
+		// if no interactions played out, lets build a system level series of responses with what we have
+		if(cnt == 0) {
+			it = tm.values().iterator();
+			while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
+				int i = it.next();
+				Result result = nearest.get(i);
+				TimestampRole trr =  (TimestampRole) result.get(0);
+				trr.setRole(Role.SYSTEM);
+				addRetrievedMessage(result, trr, results, returns, tokenizer);
+			}
+		}
 		// put most recent user query last
 		returns.add(promptFrame.getMessage());
 		return returns;
