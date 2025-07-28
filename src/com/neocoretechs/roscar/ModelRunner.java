@@ -13,6 +13,9 @@
 package com.neocoretechs.roscar;
 
 import jdk.incubator.vector.*;
+import stereo_msgs.DisparityImage;
+import stereo_msgs.DisparityImage2;
+import stereo_msgs.StereoImage;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -115,6 +118,13 @@ public class ModelRunner extends AbstractNodeMain {
 	public static final String LLM = "/model";
 	
 	CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
+	
+	protected Object mutex = new Object();
+	static double eulers[] = new double[]{0.0,0.0,0.0};
+	static long imageDeltaMs = 1000;
+	static long imuDeltaMs = 1000;
+	static long lastImageTime = System.currentTimeMillis();
+	static long lastIMUTime = System.currentTimeMillis();
 	
 	static RelatrixLSH relatrixLSH = null;
 
@@ -467,12 +477,27 @@ public class ModelRunner extends AbstractNodeMain {
 		//final Log log = connectedNode.getLog();
 		final Publisher<std_msgs.String> pubmodel = connectedNode.newPublisher(LLM, std_msgs.String._TYPE);
 		// Subscribers
-		Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
-		Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
-	
+		final Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
+		final Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
+		final Subscriber<stereo_msgs.StereoImage> subsobjd = connectedNode.newSubscriber("/stereo_msgs/ObjectDetect", stereo_msgs.StereoImage._TYPE);
 		//
 		// set up subscriber callback
 		//
+		subsobjd.addMessageListener(new MessageListener<stereo_msgs.StereoImage>() {
+			@Override
+			public void onNewMessage(StereoImage message) {
+				ByteBuffer buf = message.getData();
+				String sbuf = new String(buf.array());
+				long imageTime = System.currentTimeMillis();
+		        try {
+	        		if((imageTime-lastImageTime) > imageDeltaMs) {
+	        			lastImageTime = imageTime;
+	        			messageQueue.addLastWait(sbuf);
+	        		}
+	        	} catch(InterruptedException ie) {}
+			}
+		});
+
 		subsuser.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
