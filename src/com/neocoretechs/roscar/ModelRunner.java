@@ -13,20 +13,21 @@
 package com.neocoretechs.roscar;
 
 import jdk.incubator.vector.*;
-import stereo_msgs.DisparityImage;
-import stereo_msgs.DisparityImage2;
 import stereo_msgs.StereoImage;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.Externalizable;
-import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.Serializable;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.ObjectInput;
+import java.io.ObjectInputStream;
 import java.io.ObjectOutput;
+import java.io.ObjectOutputStream;
 import java.io.PrintWriter;
 
 import java.lang.foreign.Arena;
@@ -80,9 +81,6 @@ import org.ros.node.AbstractNodeMain;
 import org.ros.node.ConnectedNode;
 import org.ros.node.topic.Publisher;
 import org.ros.node.topic.Subscriber;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.key.NoIndex;
@@ -161,37 +159,55 @@ public class ModelRunner extends AbstractNodeMain {
                 model.configuration().contextLength,
                 model.configuration().contextLength - conversationTokens.size());
     }
-    
-    public void displayMetadata(Llama model) {
-        if(DISPLAY_METADATA) {
+    /**
+     * After model is loaded we can preserve special tokens extracted
+     * @param model
+     */
+    public void extractSpecialTokens(Llama model) {
     		try {
-    			ModelRunner.fileWriter = new FileWriter(options.modelPath.toString()+".metadata", false);
-    			ModelRunner.outputStream = new BufferedWriter(fileWriter);
-    			ModelRunner.output = new PrintWriter(outputStream);
+    			FileOutputStream fileWriter = new FileOutputStream(options.modelPath.toString()+"-specialTokens.ser", false);
+    			ObjectOutputStream outputStream = new ObjectOutputStream(fileWriter);
+    			outputStream.writeObject(model.tokenizer().getSpecialTokens());
+    			outputStream.flush();
+    			outputStream.close();
+    			fileWriter.close();
     		} catch(IOException e) {
-    			log.error("Could not open file " + options.modelPath.toString()+".metadata\r\n"+e);
+    			log.error("Could not open file " + options.modelPath.toString()+"-specialTokens.ser\r\n"+e);
     		}
-        	ModelRunner.output.println("Begin Special tokens:");
-        	ModelRunner.output.println(model.tokenizer().getSpecialTokens());
-        	ModelRunner.output.println("End Special tokens.\r\n");
-        	try {
-        		ModelRunner.outputStream.flush();
-        		ModelRunner.output.close();
-        	} catch (final IOException e) {
-        		log.error("Could not flush metadata file "+e);
-        	} finally {
-        		try {
-        			if (ModelRunner.outputStream != null) {
-        				ModelRunner.outputStream.close();
-        			}
-        			if (ModelRunner.output != null) {
-        				ModelRunner.output.close();
-        			}
-        		} catch (final IOException e) {
-        			log.error("Failed to close file: "+e);
-        		}
-        	}
-        }
+    }
+    /**
+     * After model is loaded, we can preserve Merges.
+     * @param model
+     */
+    public void extractMerges(Llama model) {
+ 		try {
+ 			FileOutputStream fileWriter = new FileOutputStream(options.modelPath.toString()+"-merges.ser", false);
+   			ObjectOutputStream outputStream = new ObjectOutputStream(fileWriter);
+			outputStream.writeObject(model.tokenizer().getMerges());
+			outputStream.flush();
+			outputStream.close();
+			fileWriter.close();
+		} catch(IOException e) {
+			log.error("Could not open file " + options.modelPath.toString()+"-merges.ser\r\n"+e);
+		}
+    }
+    /**
+     * After model is loaded, we can preserve Merges.
+     * @param model
+     */
+    public static Map<Pair<Integer,Integer>,Integer> loadMerges() {
+ 		try {
+ 			FileInputStream fileReader = new FileInputStream("merges.ser");
+   			ObjectInputStream inputStream = new ObjectInputStream(fileReader);
+			Map<Pair<Integer,Integer>,Integer> merges = (Map<Pair<Integer,Integer>,Integer>) inputStream.readObject();
+			fileReader.close();
+			return merges;
+		} catch(IOException e) {
+			log.error("Could not open file merges.ser\r\n"+e);
+		} catch (ClassNotFoundException e) {
+			e.printStackTrace();
+		}
+ 		return null;
     }
     /**
      * Parse the command line for url and xpath directive
@@ -382,7 +398,7 @@ public class ModelRunner extends AbstractNodeMain {
                             case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
                             case "--echo" -> echo = Boolean.parseBoolean(nextArg);
                             case "--preload" -> preload = Boolean.parseBoolean(nextArg);
-                            case "--metadata" -> DISPLAY_METADATA = true;
+                            case "--metadata" -> DISPLAY_METADATA = Boolean.parseBoolean(nextArg);
                             default -> require(false, "Unknown option: %s", optionName);
                         }
                     }
@@ -424,8 +440,12 @@ public class ModelRunner extends AbstractNodeMain {
 		//
 		try {
 			model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
-			if(model == null)
+			if(model == null) {
 				model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
+				if(DISPLAY_METADATA) {
+					extractMerges(model);
+				}
+			}
 		} catch(IOException e) {
 			log.error("Could not load model " + options.modelPath.toString()+e);
 			System.exit(1);
@@ -451,7 +471,8 @@ public class ModelRunner extends AbstractNodeMain {
 		promptTokens.addAll(chatFormat.encodeDialogPrompt(true, prompts));
 		Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
         if(response.isPresent()) {
-        	log.info("***Queueing from system preamble:"+response.get());
+        	if(DEBUG)
+        		log.info("***Queueing from system preamble:"+response.get());
         	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
         	PromptFrame responseFrame = new PromptFrame(chatFormat);
         	responseFrame.setMessage(responseMessage);
@@ -487,12 +508,37 @@ public class ModelRunner extends AbstractNodeMain {
 			@Override
 			public void onNewMessage(StereoImage message) {
 				ByteBuffer buf = message.getData();
-				String sbuf = new String(buf.array());
+				String sbuf = new String(buf.array(), buf.position(), buf.remaining(), StandardCharsets.UTF_8);
 				long imageTime = System.currentTimeMillis();
 		        try {
 	        		if((imageTime-lastImageTime) > imageDeltaMs) {
 	        			lastImageTime = imageTime;
-	        			messageQueue.addLastWait(sbuf);
+	        	        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+	    		        List<Integer> promptTokens = new ArrayList<>();
+	    		        promptTokens.add(chatFormat.getBeginOfText());
+	    		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, sbuf);
+	    		        promptFrame.setMessage(chatMessage);
+	    		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
+	    		        List<ChatFormat.Message> responses = null;
+	    		        try {
+	    					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
+	    				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
+	    					e.printStackTrace();
+	    				}
+	    		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
+	    		        if(DEBUG)
+	    		        	log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
+	    		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
+	    		        if(response.isPresent()) {
+	    		        	if(DEBUG)
+	    		        		log.info("***Queueing from role USER:"+response.get());
+	    		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+	    		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
+	    		        	responseFrame.setMessage(responseMessage);
+	    		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
+	    		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.USER, userMessage, responseTokens);
+	        			messageQueue.addLastWait(response.get());
+	    		        }
 	        		}
 	        	} catch(InterruptedException ie) {}
 			}
@@ -514,10 +560,12 @@ public class ModelRunner extends AbstractNodeMain {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
-		        log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
+		        if(DEBUG)
+		        	log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	log.info("***Queueing from role USER:"+response.get());
+		        	if(DEBUG)
+		        		log.info("***Queueing from role USER:"+response.get());
 		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
 		        	responseFrame.setMessage(responseMessage);
@@ -545,10 +593,12 @@ public class ModelRunner extends AbstractNodeMain {
 					e.printStackTrace();
 				}
 		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true,responses));
-		        log.info("***System FindNearest returned:"+ model.tokenizer().decode(promptTokens));
+		        if(DEBUG)
+		        	log.info("***System FindNearest returned:"+ model.tokenizer().decode(promptTokens));
 		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
 		        if(response.isPresent()) {
-		        	log.info("***Queueing from role SYSTEM:"+response.get());
+		        	if(DEBUG)
+		        		log.info("***Queueing from role SYSTEM:"+response.get());
 		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
 		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
 		        	responseFrame.setMessage(responseMessage);
@@ -999,6 +1049,7 @@ interface Timer extends AutoCloseable {
  * create Llama with config, tokenizer, weights
  */
 final class ModelLoader {
+	static final Log log = LogFactory.getLog(ModelLoader.class);
     static final String TOKENIZER_GPT2_MODEL = "gpt2"; // ModelRunner uses gpt2!
     static final String TOKENIZER_LLAMA_MODEL = "llama"; // non Llama uses llama!
     public static String model = "gpt2"; // default for Llama models!
@@ -1008,7 +1059,7 @@ final class ModelLoader {
     private static Vocabulary loadVocabulary(Map<String, Object> metadata) {
         model = (String) metadata.get("tokenizer.ggml.model");
         name = (String) metadata.get("general.name");
-        if(name.toLowerCase().contains("llama")) // Meta Llama etc. etc.
+        if(name.toLowerCase().contains("llama")) // Meta Llama, etc. etc.
         	name = "llama";
         else
         	if(name.toLowerCase().contains("mistral")) //models--mistralai etc. etc.
@@ -1030,6 +1081,10 @@ final class ModelLoader {
     public static Llama loadModel(Path ggufPath, int contextLength, boolean loadWeights) throws IOException {
         GGUF gguf = GGUF.loadModel(ggufPath);
         FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
+        if(ModelRunner.DISPLAY_METADATA) {
+    		ModelRunner.fileWriter = new FileWriter(ggufPath.toString()+".metadata", false);
+            ModelRunner.output = new PrintWriter(ModelRunner.fileWriter);
+        }
         return loadModel(fileChannel, gguf, contextLength, loadWeights);
     }
 
@@ -1091,7 +1146,7 @@ final class ModelLoader {
                         weights = loadGPT2Weights(tensorEntries, config);
                     }
             	} else
-        			throw new IllegalArgumentException("expected metadata general.name containing mistral oe llama but found "+ModelLoader.name);
+        			throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
             }
             return new Llama(config, tokenizer, weights);
         }
@@ -1180,17 +1235,7 @@ final class ModelLoader {
            return qw;
     }
     
- 
     private static Tokenizer createGPT2Tokenizer(Map<String, Object> metadata, Vocabulary vocabulary) {
-        String[] mergeLines = (String[]) metadata.get("tokenizer.ggml.merges");
-        List<Pair<Integer, Integer>> merges = Arrays.stream(mergeLines)
-                .map(line -> line.split(" "))
-                .map(parts ->
-                        new Pair<>(
-                                vocabulary.getIndex(parts[0]).orElseThrow(),
-                                vocabulary.getIndex(parts[1]).orElseThrow())
-                ).toList();
-
         int allTokens = vocabulary.size();
         int baseTokens = 128000; // assume all tokens after the base ones are special.
         int reservedSpecialTokens = allTokens - baseTokens;
@@ -1199,26 +1244,23 @@ final class ModelLoader {
         assert specialTokensList.stream().allMatch(token -> vocabulary.getIndex(token).isPresent());
 
         Map<String, Integer> specialTokens =
-                IntStream.range(0, specialTokensList.size())
-                        .boxed()
-                        .collect(Collectors.toMap(
+                IntStream.range(0, specialTokensList.size()).boxed().collect(Collectors.toMap(
                                 i -> specialTokensList.get(i),
                                 i -> baseTokens + i)
                         );
-
+        String[] mergeLines = (String[]) metadata.get("tokenizer.ggml.merges");
+        List<Pair<Integer, Integer>> merges = Arrays.stream(mergeLines)
+                .map(line ->line.split(" "))
+                .map(parts->new Pair<>(vocabulary.getIndex(parts[0]).orElseThrow(),vocabulary.getIndex(parts[1]).orElseThrow())).toList();
         return new Tokenizer(vocabulary, merges, LLAMA_3_PATTERN, specialTokens);
     }
     
     private static MistralTokenizer createLlamaTokenizer(Map<String, Object> metadata, Vocabulary vocabulary) {
         int[] tokenTypes = (int[]) metadata.get("tokenizer.ggml.token_type");
         List<Integer> specialTokensList = IntStream.range(0, vocabulary.size()).filter(t -> tokenTypes[t] != 1 && tokenTypes[t] != 6).boxed().toList();
-        Map<String, Integer> specialTokens =
-                IntStream.range(0, specialTokensList.size())
-                        .boxed()
-                        .collect(Collectors.toMap(
+        Map<String, Integer> specialTokens = IntStream.range(0, specialTokensList.size()).boxed().collect(Collectors.toMap(
                                 t -> vocabulary.get(t),
-                                t -> t)
-                        );
+                                t -> t));
         return new MistralTokenizer(vocabulary, null, specialTokens, tokenTypes);
     }
     
@@ -1732,12 +1774,12 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
                 final int[] tokens = new int[nTokens];
                 for (int i = 0; i < nTokens; i++) {
                     tokens[i] = promptTokens.get(promptIndex + i);
-                    if (echo) {
+                    if(echo) {
                         // log prompt token (different color?)
                         System.err.print(Tokenizer.replaceControlCharacters(model.tokenizer().decode(List.of(tokens[i]))));
                     }
                 }
-                if (echo) {
+                if(echo) {
                     log.info(String.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens)));
                 }
                 // Only compute logits on the very last batch.
@@ -1753,7 +1795,7 @@ record Llama(Configuration configuration, TokenizerInterface tokenizer, Weights 
                 forward(model, state, new int[]{token}, position, true);
             }
             nextToken = sampler.sampleToken(state.logits);
-            if (echo) {
+            if(echo) {
                 // log inferred token
                 System.err.print(Tokenizer.replaceControlCharacters(model.tokenizer().decode(List.of(nextToken))));
             }
@@ -1786,6 +1828,7 @@ interface TokenizerInterface {
 	 public List<Integer> encodeAsList(String text);
 	 public int getTokenType(int tokenIndex);
 	 public Collection<? extends Integer> encode(String text);
+	 public Map<Pair<Integer, Integer>, Integer> getMerges();
 }
 /**
  * Byte Pair Encoding tokenizer.
@@ -1796,7 +1839,7 @@ interface TokenizerInterface {
 class Tokenizer implements TokenizerInterface {
     private final Pattern compiledPattern;
     private final Vocabulary vocabulary;
-    private final Map<Pair<Integer, Integer>, Integer> merges;
+    private Map<Pair<Integer, Integer>, Integer> merges;
     private final Map<String, Integer> specialTokens;
     private int[] tokenTypes; // qwen2
 
@@ -2046,6 +2089,10 @@ class Tokenizer implements TokenizerInterface {
         }
         return new String(rawBytes, StandardCharsets.UTF_8);
     }
+	@Override
+	public Map<Pair<Integer, Integer>, Integer> getMerges() {
+		return merges;
+	}
 }
 
 /**
@@ -2186,6 +2233,10 @@ class MistralTokenizer implements TokenizerInterface {
     public List<Integer> encodeAsList(String text) {
         return encode(text);
     }
+	@Override
+	public Map<Pair<Integer, Integer>, Integer> getMerges() {
+		return null;
+	}
 }
 
 final class Parallel {
@@ -4140,7 +4191,7 @@ final class RelatrixLSH implements Serializable, Comparable {
 		this(dbClient, 12, 16, 50, maxTokens);
 	}
 	/**
-	 * Initialize a new hash table, uses COsing hash family.
+	 * Initialize a new hash table, uses Cosine hash family.
 	 * @param dbClient the Relatrix client from connected node
 	 * @param numberOfHashes The number of hash functions that should be used.
 	 * @param numberOfhashTables the number of tables each containing number of hashes
@@ -4358,12 +4409,14 @@ final class RelatrixLSH implements Serializable, Comparable {
 	public List<Message> findNearest(PromptFrame promptFrame, TokenizerInterface tokenizer) throws IllegalArgumentException, ClassNotFoundException, IllegalAccessException, IOException, InterruptedException, ExecutionException {
 		List<Result> nearest = null;
 		List<Integer> results = (List<Integer>)promptFrame.getRawTokens();
-		log.info("User query has "+results.size()+" tokens");
+		if(DEBUG)
+			log.info("User query has "+results.size()+" tokens");
 		List<ChatFormat.Message> returns = new ArrayList<ChatFormat.Message>();
 
 		FloatTensor fmessage = normalize(results);
 		nearest = queryParallel(results, fmessage);
-		log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
+		if(DEBUG)
+			log.info("Retrieved "+nearest.size()+" entries from LSH index query.");
 		// If we retrieved nothing from semantic query of initial message, try getting last timestamp
 		if(nearest.isEmpty()) {
 			//return results;
@@ -4386,7 +4439,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 			if(nearest == null || nearest.isEmpty()) {
 				// put most recent user query last
 				returns.add(promptFrame.getMessage());
-				log.info("Returning from empty index and timestamp query with original prompt");
+				if(DEBUG)
+					log.info("Returning from empty index and timestamp query with original prompt");
 				return returns;
 			}
 		}
@@ -4403,7 +4457,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 			// TimestampRole at Result.get(0)
 			NoIndex noIndex = (NoIndex) result.get(1);
 			List<Integer> restensor = (List<Integer>)noIndex.getInstance();
-			log.info("retrieved dialog:"+result.get(0)+" "+tokenizer.decode(restensor));
+			if(DEBUG)
+				log.info("retrieved dialog:"+result.get(0)+" "+tokenizer.decode(restensor));
 			double cosDist;
 			FloatTensor cantensor = normalize(restensor);
 			if(cantensor.size() < fmessage.size())
@@ -4508,10 +4563,12 @@ final class RelatrixLSH implements Serializable, Comparable {
 			addRetrievedMessage(result, results, returns, tokenizer);
 			++cnt;
 		}
-		log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
+		if(DEBUG)
+			log.info(cnt+" results inserted into context. Similarities:"+Arrays.toString(cossim));
 		// if no interactions played out, lets build a system level series of responses with what we have
 		if(cnt == 0) {
-			log.info(tm.values().size()+" context entries, current results:"+results.size()+" max:"+(maxTokens - (((float)maxTokens) * .3)));
+			if(DEBUG)
+				log.info(tm.values().size()+" context entries, current results:"+results.size()+" max:"+(maxTokens - (((float)maxTokens) * .3)));
 			it = tm.values().iterator();
 			while(it.hasNext() && results.size() < (maxTokens - (((float)maxTokens) * .3))) {
 				int i = it.next();
@@ -4537,7 +4594,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 		NoIndex noIndex = (NoIndex) result.get(1);
 		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 		results.addAll(restensor); // to keep track of max context size
-		log.info("addRetrievedMessage:"+(TimestampRole)result.get(0));
+		if(DEBUG)
+			log.info("addRetrievedMessage:"+(TimestampRole)result.get(0));
 		returns.add(new ChatFormat.Message(((TimestampRole)result.get(0)).getRole(), tokenizer.decode(restensor)));
 	}
 	/**
@@ -4553,7 +4611,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 		NoIndex noIndex = (NoIndex) result.get(0);
 		List<Integer> restensor = (List<Integer>)noIndex.getInstance();
 		results.addAll(restensor); // to keep track of max context size
-		log.info("addRetrievedMessage:"+trr);
+		if(DEBUG)
+			log.info("addRetrievedMessage:"+trr);
 		returns.add(new ChatFormat.Message(trr.getRole(), tokenizer.decode(restensor)));
 	}
 	/**
@@ -4566,14 +4625,16 @@ final class RelatrixLSH implements Serializable, Comparable {
 	 * @throws ExecutionException
 	 */
 	private void getTimestampRole(List<Integer> results, List<Message> returns, TimestampRole trr, TokenizerInterface tokenizer) throws InterruptedException, ExecutionException {
-		log.info("getTimestampRole for "+trr);
+		if(DEBUG)
+			log.info("getTimestampRole for "+trr);
 		//CompletableFuture<Stream> cit = dbClient.findStream(xid, '*', trr, '?');
 		//cit.get().forEach(e->{
 		CompletableFuture<Iterator> cit = dbClient.findSet(xid, '*', trr, '?');
 		Iterator<?> it = cit.get();
 		// get one instance
 		if(it.hasNext()) {
-			log.info("getTimeStampRole result");
+			if(DEBUG)
+				log.info("getTimeStampRole result");
 			//addRetrievedMessage((Result)e, trr, results, returns, tokenizer);
 			addRetrievedMessage((Result)it.next(), trr, results, returns, tokenizer);
 		//});
@@ -4601,7 +4662,8 @@ final class RelatrixLSH implements Serializable, Comparable {
 				}
 			}
 		}
-		log.info("primeByTime returned "+res.size()+" results.");
+		if(DEBUG)
+			log.info("primeByTime returned "+res.size()+" results.");
 		return res;
 	}
 	/**
