@@ -1,14 +1,15 @@
 /**
- * COMPILE_OPTIONS --add-modules=jdk.incubator.vector
- * RUNTIME_OPTIONS --add-modules=jdk.incubator.vector -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0
- *
- * Practical inference in a single Java file
- * Supports llama.cpp's GGUF format, restricted to Q4_0 and Q8_0 quantized models
- * Multi-threaded matrix vector multiplication routines implemented using Java's Vector API
- * Simple CLI with --chat and --instruct mode
- *
- *
+ * COMPILE_OPTIONS --add-modules=jdk.incubator.vector <br>
+ * RUNTIME_OPTIONS --add-modules=jdk.incubator.vector -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 <br>
+ * <p>
+ * Practical inference in a single Java file. <o>
+ * Supports llama.cpp's GGUF format, restricted to Q4_0 and Q8_0 quantized models. <p>
+ * Multi-threaded matrix vector multiplication routines implemented using Java's Vector API. <p>
+ * Accepts commands from RosJavaLite bus topics, including sensors and status, and fuses those
+ * into coherent responses to perform embodied field robotics. Derived from Oracle model runner.
+ * Uses LSH indexing and semantic retrieval to provide virtually unlimited context with semantic augmentation.<p>
  * Remember: Llama models use GPT2 vocabulary while non-Llama models use Llama vocabulary!
+ * @author Jonathan Groff Copyright (C) NeoCoreTechs 2025
  */
 package com.neocoretechs.roscar;
 
@@ -108,6 +109,10 @@ import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
 import com.neocoretechs.roscar.ChatFormat.Message;
 import com.neocoretechs.roscar.ChatFormat.Role;
+
+import diagnostic_msgs.DiagnosticStatus;
+import diagnostic_msgs.KeyValue;
+
 import com.neocoretechs.rocksack.Alias;
 import com.neocoretechs.relatrix.DuplicateKeyException;
 
@@ -156,7 +161,7 @@ public class ModelRunner extends AbstractNodeMain {
 		std_msgs.String range;
 		long rangeTime = 0L;
 		public String toJSON() {
-			return String.format("{range=%s}", range);
+			return String.format("{range=%s}", range.getData());
 		}
 	}
 	RangeTime ranges = new RangeTime();
@@ -560,10 +565,9 @@ public class ModelRunner extends AbstractNodeMain {
 		final Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
 		final Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
 		final Subscriber<stereo_msgs.StereoImage> subsobjd = connectedNode.newSubscriber("/stereo_msgs/ObjectDetect", stereo_msgs.StereoImage._TYPE);
-		final Subscriber<sensor_msgs.Imu> subsimu = 
-				connectedNode.newSubscriber("/sensor_msgs/Imu", sensor_msgs.Imu._TYPE);
-		final Subscriber<std_msgs.String> subsrange = 
-				connectedNode.newSubscriber("/sensor_msgs/range",std_msgs.String._TYPE);
+		final Subscriber<sensor_msgs.Imu> subsimu = connectedNode.newSubscriber("/sensor_msgs/Imu", sensor_msgs.Imu._TYPE);
+		final Subscriber<std_msgs.String> subsrange = connectedNode.newSubscriber("/sensor_msgs/range",std_msgs.String._TYPE);
+		final Subscriber<diagnostic_msgs.DiagnosticStatus> subsbat = connectedNode.newSubscriber("robocore/status", diagnostic_msgs.DiagnosticStatus._TYPE);
 		//
 		// set up subscriber callback for object detection messages
 		//
@@ -576,38 +580,10 @@ public class ModelRunner extends AbstractNodeMain {
 				ByteBuffer buf = message.getData();
 				String sbuf = new String(buf.array(), buf.position(), buf.remaining(), StandardCharsets.UTF_8);
 				long imageTime = System.currentTimeMillis();
-		        try {
-	        		if((imageTime-lastImageTime) >= MESSAGE_THRESHOLD) {
-	        			lastImageTime = imageTime;
-	        	        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-	    		        List<Integer> promptTokens = new ArrayList<>();
-	    		        promptTokens.add(chatFormat.getBeginOfText());
-	    		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, sbuf);
-	    		        promptFrame.setMessage(chatMessage);
-	    		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
-	    		        List<ChatFormat.Message> responses = null;
-	    		        try {
-	    					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
-	    				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
-	    					e.printStackTrace();
-	    					responses = new ArrayList<ChatFormat.Message>();
-	    				}
-	    		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
-	    		        if(DEBUG)
-	    		        	log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
-	    		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
-	    		        if(response.isPresent()) {
-	    		        	if(DEBUG)
-	    		        		log.info("***Queueing from role USER:"+response.get());
-	    		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-	    		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
-	    		        	responseFrame.setMessage(responseMessage);
-	    		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-	    		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.USER, userMessage, responseTokens);
-	    		    		messageQueue.addLastWait(response.get());
-	    		        }
-	        		}
-	        	} catch(InterruptedException ie) {}
+	        	if((imageTime-lastImageTime) >= MESSAGE_THRESHOLD) {
+	        		lastImageTime = imageTime;
+	        		processRole(sbuf, ChatFormat.Role.USER);
+	        	}
 			}
 		});
 
@@ -617,70 +593,17 @@ public class ModelRunner extends AbstractNodeMain {
 				try {
 					dbLatch.await();
 				} catch (InterruptedException e) { return; }
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.USER, message.getData());
-		        promptFrame.setMessage(chatMessage);
-		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
-		        List<ChatFormat.Message> responses = null;
-		        try {
-					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
-				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
-					e.printStackTrace();
-				}
-		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
-		        if(DEBUG)
-		        	log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
-		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent()) {
-		        	if(DEBUG)
-		        		log.info("***Queueing from role USER:"+response.get());
-		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
-		        	responseFrame.setMessage(responseMessage);
-		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.USER, userMessage, responseTokens);
-		        	try {
-		        		messageQueue.addLastWait(response.get());
-		        	} catch(InterruptedException ie) {}
-		        }
+				processRole(message.getData(), ChatFormat.Role.USER);
 			}
 		});
+		
 		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
 				try {
 					dbLatch.await();
 				} catch (InterruptedException e) { return; }
-		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		        List<Integer> promptTokens = new ArrayList<>();
-		        promptTokens.add(chatFormat.getBeginOfText());
-		        ChatFormat.Message chatMessage = new ChatFormat.Message(ChatFormat.Role.SYSTEM, message.getData());
-		        promptFrame.setMessage(chatMessage);
-		        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
-		        List<ChatFormat.Message> responses = null;
-		        try {
-					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
-				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
-					e.printStackTrace();
-				}
-		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true,responses));
-		        if(DEBUG)
-		        	log.info("***System FindNearest returned:"+ model.tokenizer().decode(promptTokens));
-		        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
-		        if(response.isPresent()) {
-		        	if(DEBUG)
-		        		log.info("***Queueing from role SYSTEM:"+response.get());
-		        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-		        	PromptFrame responseFrame = new PromptFrame(chatFormat);
-		        	responseFrame.setMessage(responseMessage);
-		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.SYSTEM, userMessage, responseTokens);
-		        	try {
-		        		messageQueue.addLastWait(response.get());
-        			} catch(InterruptedException ie) {}
-		        }
+				processRole(message.getData(), ChatFormat.Role.SYSTEM);
 			}
 		});
 		//
@@ -694,15 +617,18 @@ public class ModelRunner extends AbstractNodeMain {
 					dbLatch.await();
 				} catch (InterruptedException e) { return; }
 				synchronized(euler) {
-					if(Arrays.compare(euler.euler.getOrientationCovariance(), message.getOrientationCovariance()) != 0) {
-						if((System.currentTimeMillis() - euler.eulerTime) >= MESSAGE_THRESHOLD) {
+					if(euler.euler == null) {
+						euler.euler = message;
+						euler.eulerTime = System.currentTimeMillis();
+						processRole("IMU update:\n"+euler.euler.toJSON(), ChatFormat.Role.USER);
+					} else
+						if(Arrays.compare(euler.euler.getOrientationCovariance(), message.getOrientationCovariance()) != 0) {
 							euler.euler = message;
-							euler.eulerTime = System.currentTimeMillis();
-				        	try {
-				        		messageQueue.addLastWait("IMU update:\n"+euler.euler.toJSON());
-		        			} catch(InterruptedException ie) {}
+							if((System.currentTimeMillis() - euler.eulerTime) >= MESSAGE_THRESHOLD) {
+								euler.eulerTime = System.currentTimeMillis();
+								processRole("IMU update:\n"+euler.euler.toJSON(), ChatFormat.Role.USER);
+							}
 						}
-					}
 				}
 			}
 		});
@@ -716,19 +642,50 @@ public class ModelRunner extends AbstractNodeMain {
 					dbLatch.await();
 				} catch (InterruptedException e) { return; }
 				synchronized(ranges) {
-					if(ranges.range.getData() != message.getData()) {
+					if(ranges.range == null) {
 						ranges.range = message; //Float.parseFloat(message.getData());
 						ranges.rangeTime = System.currentTimeMillis();
-			        	try {
-			        		messageQueue.addLastWait("Nearest distance update:\n"+ranges.toJSON());
-	        			} catch(InterruptedException ie) {}
-					}
+						processRole("Nearest distance update:\n"+ranges.toJSON(), ChatFormat.Role.USER);
+					} else
+						if(ranges.range.getData() != message.getData()) {
+							ranges.range = message; //Float.parseFloat(message.getData());
+							if((System.currentTimeMillis() - ranges.rangeTime) >= MESSAGE_THRESHOLD) {
+								ranges.rangeTime = System.currentTimeMillis();
+								processRole("Nearest distance update:\n"+ranges.toJSON(), ChatFormat.Role.USER);
+							}
+						}
 				}
 			}
 		});
+		
+		subsbat.addMessageListener(new MessageListener<diagnostic_msgs.DiagnosticStatus>() {
+			@Override
+			public void onNewMessage(DiagnosticStatus message) {
+				//System.out.println(message.getHardwareId()+" Status "+message.getMessage());
+				StringBuilder sb = new StringBuilder();
+				sb.append("MessageName:");
+				sb.append(message.getName());
+				sb.append(" Level:");
+				sb.append(message.getLevel()+"\r\n");
+				sb.append(message.getMessage()+"\r\n");
+				sb.append(message.getHardwareId()+"\r\n");
+				List<KeyValue> diagMsgs = message.getValues();
+				if( diagMsgs != null ) {
+						for( KeyValue msg : diagMsgs) {
+							sb.append(msg.getKey()+" ");
+							if( msg.getValue() != null ) {
+								sb.append(msg.getValue()+"\r\n");
+							}
+						}
+						if(DEBUG)
+							System.out.println(sb.toString());
+						processRole(sb.toString(), ChatFormat.Role.USER);
+				}
+			}
+		});
+		
 		/**
-		 * Main publishing loop. Essentially we are publishing the data in whatever state its in, using the
-		 * mutex appropriate to establish critical sections. A sleep follows each publication to keep the bus arbitrated
+		 * Main publishing loop. Essentially we are publishing the data in whatever state its in.
 		 * This CancellableLoop will be canceled automatically when the node shuts down
 		 */
 		connectedNode.executeCancellableLoop(new CancellableLoop() {
@@ -765,7 +722,49 @@ public class ModelRunner extends AbstractNodeMain {
         }
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
 	}
-	
+	/**
+	 * Process the given interaction using the role provided, beginning with model.CreateNewState
+	 * and ending with a check for response.isPresent and if so, relatrixLSH.addInteraction, then messageQueue.addLastWait(response).
+	 * @param message The message to process, the response is in ChatFormat.Role.ASSISTANT
+	 * @param role the role context. role is ChatFromat.Role.USER, ChatFromat.Role.SYSTEM, ChatFromat.Role.ASSISTANT
+	 */
+	private void processRole(String message, ChatFormat.Role role) {
+        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+        List<Integer> promptTokens = new ArrayList<>();
+        promptTokens.add(chatFormat.getBeginOfText());
+        ChatFormat.Message chatMessage = new ChatFormat.Message(role, message);
+        promptFrame.setMessage(chatMessage);
+        List<Integer> userMessage = new ArrayList<Integer>(promptFrame.getRawTokens());
+        List<ChatFormat.Message> responses = null;
+        try {
+			responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
+		} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
+			e.printStackTrace();
+			responses = new ArrayList<ChatFormat.Message>();
+		}
+        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
+        if(DEBUG)
+        	log.info("***User FindNearest returned:"+ model.tokenizer().decode(promptTokens));
+        Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
+        if(response.isPresent()) {
+        	if(DEBUG)
+        		log.info("***Queueing from role USER:"+response.get());
+        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+        	PromptFrame responseFrame = new PromptFrame(chatFormat);
+        	responseFrame.setMessage(responseMessage);
+        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
+    		relatrixLSH.addInteraction(System.currentTimeMillis(), role, userMessage, responseTokens);
+        	try {
+        		messageQueue.addLastWait(response.get());
+        	} catch(InterruptedException ie) {}
+        }
+	}
+	/**
+	 * Intercept the model output and generate a movement command to be published to the {@link com.neocoretechs.robocore.propulsion.MotionController}
+	 * @param modelOutput
+	 * @param currentHeading
+	 * @return
+	 */
 	public Optional<ComeToHeadingStamped> intercept(String modelOutput, float currentHeading) {
 		try {
 			JSONObject obj = new JSONObject(modelOutput);
