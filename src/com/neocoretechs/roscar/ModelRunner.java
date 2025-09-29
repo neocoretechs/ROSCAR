@@ -14,6 +14,7 @@ package com.neocoretechs.roscar;
 
 import jdk.incubator.vector.*;
 import stereo_msgs.StereoImage;
+import trajectory_msgs.ComeToHeadingStamped;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -81,6 +82,8 @@ import org.ros.node.AbstractNodeMain;
 import org.ros.node.ConnectedNode;
 import org.ros.node.topic.Publisher;
 import org.ros.node.topic.Subscriber;
+
+import org.json.JSONObject;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.key.NoIndex;
@@ -649,6 +652,29 @@ public class ModelRunner extends AbstractNodeMain {
             responseTokens.removeLast();
         }
         return Optional.ofNullable(model.tokenizer().decode(responseTokens));
+	}
+	
+	public Optional<ComeToHeadingStamped> intercept(String modelOutput, float currentHeading) {
+		try {
+			JSONObject obj = new JSONObject(modelOutput);
+			String actionStr = obj.getString("action");
+			ComeToHeadingStamped.action act = ComeToHeadingStamped.action.valueOf(actionStr);
+			int distance = obj.optInt("distance", 0);
+			float heading = obj.optFloat("heading", currentHeading);
+			long timestamp = obj.optLong("timestamp", System.currentTimeMillis());
+			ComeToHeadingStamped cths = new ComeToHeadingStamped();
+			cths.fromJSON(actionStr);
+			std_msgs.Int32 mdist = new std_msgs.Int32();
+			mdist.setData(distance);
+			std_msgs.Float32 mhead = new std_msgs.Float32();
+			mhead.setData(heading);
+			std_msgs.UInt64 mtime = new std_msgs.UInt64();
+			mtime.setData(timestamp);
+			return Optional.of(new ComeToHeadingStamped(act,mdist,mhead,mtime));
+		} catch (Exception e) {
+			log.error("Failed to parse model output: " + e.getMessage());
+			return Optional.empty();
+		}
 	}
 
 }
@@ -2589,7 +2615,6 @@ abstract class FloatTensor implements Externalizable, Comparable {
     	return sb.toString();
     }
 }
-
 
 /**
  * {@link FloatTensor} quantized in the {@link GGMLType#Q4_0} format.
