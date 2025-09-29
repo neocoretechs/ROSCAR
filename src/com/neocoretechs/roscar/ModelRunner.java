@@ -49,8 +49,23 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.Iterator;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.DoubleAdder;
@@ -87,6 +102,7 @@ import org.json.JSONObject;
 
 import com.neocoretechs.relatrix.client.asynch.AsynchRelatrixClientTransaction;
 import com.neocoretechs.relatrix.key.NoIndex;
+import com.neocoretechs.relatrix.parallel.SynchronizedThreadManager;
 import com.neocoretechs.relatrix.Result;
 import com.neocoretechs.relatrix.Relation;
 import com.neocoretechs.rocksack.TransactionId;
@@ -121,14 +137,30 @@ public class ModelRunner extends AbstractNodeMain {
 	CircularBlockingDeque<String> messageQueue = new CircularBlockingDeque<String>(1024);
 	
 	protected Object mutex = new Object();
-	static double eulers[] = new double[]{0.0,0.0,0.0};
-	static long imageDeltaMs = 1000;
-	static long imuDeltaMs = 1000;
+	protected CountDownLatch modelLatch = new CountDownLatch(1);
+	protected CountDownLatch dbLatch = new CountDownLatch(1);
+	
+	static long MESSAGE_THRESHOLD = 5000; // ms minimum between subscribed message reception
 	static long lastImageTime = System.currentTimeMillis();
-	static long lastIMUTime = System.currentTimeMillis();
 	
 	static RelatrixLSH relatrixLSH = null;
-
+	ChatFormatInterface chatFormat;
+	
+	static class EulerTime {
+		sensor_msgs.Imu euler;
+		long eulerTime = 0L;
+	}
+	EulerTime euler = new EulerTime();
+	
+	static class RangeTime {
+		std_msgs.String range;
+		long rangeTime = 0L;
+		public String toJSON() {
+			return String.format("{range=%s}", range);
+		}
+	}
+	RangeTime ranges = new RangeTime();
+	
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
         if (temperature == 0.0f) {
@@ -418,6 +450,7 @@ public class ModelRunner extends AbstractNodeMain {
 	
 	@Override
 	public void onStart(final ConnectedNode connectedNode) {
+		SynchronizedThreadManager.getInstance().init(new String[] {"LLM","DB"});
 		try {
 			dbClient = connectedNode.getRelatrixClient();
 			//dbClient.setTablespace("D:/etc/Relatrix/db/test/ai");
@@ -434,68 +467,91 @@ public class ModelRunner extends AbstractNodeMain {
 		} catch(IOException ioe) {
 			ioe.printStackTrace();
 		}
+		
+		//
+		// Extract the command line options and parse them into the model options class
+		//
 		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
 		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
-		ChatFormatInterface chatFormat;
+
 		//
-		// NOTE: dont use options.maxTokens() from here on out, as the value may be -1 indicating metadata
-		// contextLength is used for maximum context size. Instead make sure to use model.configuration().contextLength
+		// NOTE: dont use options.maxTokens() from here on out after we parse metadata, as the value may be -1 indicating metadata
+		// contextLength is used for maximum context size. Instead make sure to use model.configuration().contextLength, which
+		// has the parsed metadata value thats the official value.
 		//
-		try {
-			model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
-			if(model == null) {
-				model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
-				if(DISPLAY_METADATA) {
-					extractMerges(model);
+		SynchronizedThreadManager.getInstance().spin(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
+					if(model == null) {
+						model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
+						if(DISPLAY_METADATA) {
+							extractMerges(model);
+						}
+					}
+					modelLatch.countDown();
+				} catch(IOException e) {
+					log.error("Could not load model " + options.modelPath.toString()+e);
+					System.exit(1);
+				}		
+			}	
+		},"LLM");
+		//
+		// Start new thread for balance of model
+		//
+		SynchronizedThreadManager.getInstance().spin(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					modelLatch.await();
+				} catch (InterruptedException e) { return; }
+				relatrixLSH = new RelatrixLSH(dbClient, model.configuration().contextLength);
+				sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
+				// Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
+				if(ModelLoader.name.equals("mistral")) {
+					chatFormat = new MistralChatFormat(model.tokenizer());
+				} else {
+					if(ModelLoader.name.equals("llama")) {
+						chatFormat = new ChatFormat(model.tokenizer());
+					} else {
+						throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
+					}
 				}
+				// set up the preamble system directives
+				promptFrame = new PromptFrame(chatFormat);
+				List<Integer> promptTokens = new ArrayList<>();
+				promptTokens.add(chatFormat.getBeginOfText());
+				List<ChatFormat.Message> prompts = ROSCARSystemPrompts.getSystemMessages();
+				Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
+				promptTokens.addAll(chatFormat.encodeDialogPrompt(true, prompts));
+				Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
+				if(response.isPresent()) {
+					if(DEBUG)
+						log.info("***Queueing from system preamble:"+response.get());
+					ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
+					PromptFrame responseFrame = new PromptFrame(chatFormat);
+					responseFrame.setMessage(responseMessage);
+					List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
+					relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.SYSTEM, promptTokens, responseTokens);
+					try {
+						messageQueue.addLastWait(response.get());
+					} catch(InterruptedException ie) {}
+				}
+				// See if we preload DB with interactions
+				if(options.preload()) {
+					try {
+						String fileName = options.modelPath.getFileName().toString();
+						int dotIndex = fileName.lastIndexOf('.');     
+						fileName = (dotIndex == -1) ? fileName : fileName.substring(0, dotIndex);
+						ROSCARSystemPrompts.frontloadDb(relatrixLSH, chatFormat, fileName+".txt");
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
+				dbLatch.countDown();
 			}
-		} catch(IOException e) {
-			log.error("Could not load model " + options.modelPath.toString()+e);
-			System.exit(1);
-		}
-		relatrixLSH = new RelatrixLSH(dbClient, model.configuration().contextLength);
-		sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
-		// Chat format seems solely based on individual model, so we extract a name in model loader from Metada general.name
-		if(ModelLoader.name.equals("mistral")) {
-			chatFormat = new MistralChatFormat(model.tokenizer());
-		} else {
-			if(ModelLoader.name.equals("llama")) {
-				chatFormat = new ChatFormat(model.tokenizer());
-			} else {
-				throw new IllegalArgumentException("expected metadata general.name containing mistral or llama but found "+ModelLoader.name);
-			}
-		}
-		// set up the preamble system directives
-		promptFrame = new PromptFrame(chatFormat);
-        List<Integer> promptTokens = new ArrayList<>();
-        promptTokens.add(chatFormat.getBeginOfText());
-		List<ChatFormat.Message> prompts = ROSCARSystemPrompts.getSystemMessages();
-		Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
-		promptTokens.addAll(chatFormat.encodeDialogPrompt(true, prompts));
-		Optional<String> response = processMessage(model, options, sampler, state, chatFormat, promptTokens);
-        if(response.isPresent()) {
-        	if(DEBUG)
-        		log.info("***Queueing from system preamble:"+response.get());
-        	ChatFormat.Message responseMessage = new ChatFormat.Message(ChatFormat.Role.ASSISTANT, response.get());
-        	PromptFrame responseFrame = new PromptFrame(chatFormat);
-        	responseFrame.setMessage(responseMessage);
-        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
-    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.SYSTEM, promptTokens, responseTokens);
-        	try {
-        		messageQueue.addLastWait(response.get());
-			} catch(InterruptedException ie) {}
-        }
-        // See if we preload DB with interactions
-        if(options.preload()) {
-			try {
-				String fileName = options.modelPath.getFileName().toString();
-		        int dotIndex = fileName.lastIndexOf('.');     
-		        fileName = (dotIndex == -1) ? fileName : fileName.substring(0, dotIndex);
-				ROSCARSystemPrompts.frontloadDb(relatrixLSH, chatFormat, fileName+".txt");
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
-        }
+		},"DB");
 		//
 		// Set up publisher
 		//final Log log = connectedNode.getLog();
@@ -504,17 +560,24 @@ public class ModelRunner extends AbstractNodeMain {
 		final Subscriber<std_msgs.String> subsystem = connectedNode.newSubscriber(SYSTEM_PROMPT, std_msgs.String._TYPE);
 		final Subscriber<std_msgs.String> subsuser = connectedNode.newSubscriber(USER_PROMPT, std_msgs.String._TYPE);
 		final Subscriber<stereo_msgs.StereoImage> subsobjd = connectedNode.newSubscriber("/stereo_msgs/ObjectDetect", stereo_msgs.StereoImage._TYPE);
+		final Subscriber<sensor_msgs.Imu> subsimu = 
+				connectedNode.newSubscriber("/sensor_msgs/Imu", sensor_msgs.Imu._TYPE);
+		final Subscriber<std_msgs.String> subsrange = 
+				connectedNode.newSubscriber("/sensor_msgs/range",std_msgs.String._TYPE);
 		//
-		// set up subscriber callback
+		// set up subscriber callback for object detection messages
 		//
 		subsobjd.addMessageListener(new MessageListener<stereo_msgs.StereoImage>() {
 			@Override
 			public void onNewMessage(StereoImage message) {
+				try {
+					dbLatch.await();
+				} catch (InterruptedException e) { return; }
 				ByteBuffer buf = message.getData();
 				String sbuf = new String(buf.array(), buf.position(), buf.remaining(), StandardCharsets.UTF_8);
 				long imageTime = System.currentTimeMillis();
 		        try {
-	        		if((imageTime-lastImageTime) > imageDeltaMs) {
+	        		if((imageTime-lastImageTime) >= MESSAGE_THRESHOLD) {
 	        			lastImageTime = imageTime;
 	        	        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 	    		        List<Integer> promptTokens = new ArrayList<>();
@@ -527,6 +590,7 @@ public class ModelRunner extends AbstractNodeMain {
 	    					responses = relatrixLSH.findNearest(promptFrame, model.tokenizer());
 	    				} catch (IllegalArgumentException | ClassNotFoundException | IllegalAccessException | IOException | InterruptedException | ExecutionException e) {
 	    					e.printStackTrace();
+	    					responses = new ArrayList<ChatFormat.Message>();
 	    				}
 	    		        promptTokens.addAll(chatFormat.encodeDialogPrompt(true, responses));
 	    		        if(DEBUG)
@@ -540,7 +604,7 @@ public class ModelRunner extends AbstractNodeMain {
 	    		        	responseFrame.setMessage(responseMessage);
 	    		        	List<Integer> responseTokens = (List<Integer>)responseFrame.getRawTokens();
 	    		    		relatrixLSH.addInteraction(System.currentTimeMillis(), ChatFormat.Role.USER, userMessage, responseTokens);
-	        			messageQueue.addLastWait(response.get());
+	    		    		messageQueue.addLastWait(response.get());
 	    		        }
 	        		}
 	        	} catch(InterruptedException ie) {}
@@ -550,6 +614,9 @@ public class ModelRunner extends AbstractNodeMain {
 		subsuser.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
+				try {
+					dbLatch.await();
+				} catch (InterruptedException e) { return; }
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
@@ -583,6 +650,9 @@ public class ModelRunner extends AbstractNodeMain {
 		subsystem.addMessageListener(new MessageListener<std_msgs.String>() {
 			@Override
 			public void onNewMessage(std_msgs.String message) {
+				try {
+					dbLatch.await();
+				} catch (InterruptedException e) { return; }
 		        Llama.State state = model.createNewState(BATCH_SIZE, chatFormat.getBeginOfText());
 		        List<Integer> promptTokens = new ArrayList<>();
 		        promptTokens.add(chatFormat.getBeginOfText());
@@ -613,7 +683,49 @@ public class ModelRunner extends AbstractNodeMain {
 		        }
 			}
 		});
-	
+		//
+		// update all TimedImage in the queue that match the current timestamp to 1 ms with the current
+		// IMU reading
+		//
+		subsimu.addMessageListener(new MessageListener<sensor_msgs.Imu>() {
+			@Override
+			public void onNewMessage(sensor_msgs.Imu message) {
+				try {
+					dbLatch.await();
+				} catch (InterruptedException e) { return; }
+				synchronized(euler) {
+					if(Arrays.compare(euler.euler.getOrientationCovariance(), message.getOrientationCovariance()) != 0) {
+						if((System.currentTimeMillis() - euler.eulerTime) >= MESSAGE_THRESHOLD) {
+							euler.euler = message;
+							euler.eulerTime = System.currentTimeMillis();
+				        	try {
+				        		messageQueue.addLastWait("IMU update:\n"+euler.euler.toJSON());
+		        			} catch(InterruptedException ie) {}
+						}
+					}
+				}
+			}
+		});
+		//
+		// Ultrasonic distance sensor also timestamped and correlated
+		//
+		subsrange.addMessageListener(new MessageListener<std_msgs.String>() {
+			@Override
+			public void onNewMessage(std_msgs.String message) {
+				try {
+					dbLatch.await();
+				} catch (InterruptedException e) { return; }
+				synchronized(ranges) {
+					if(ranges.range.getData() != message.getData()) {
+						ranges.range = message; //Float.parseFloat(message.getData());
+						ranges.rangeTime = System.currentTimeMillis();
+			        	try {
+			        		messageQueue.addLastWait("Nearest distance update:\n"+ranges.toJSON());
+	        			} catch(InterruptedException ie) {}
+					}
+				}
+			}
+		});
 		/**
 		 * Main publishing loop. Essentially we are publishing the data in whatever state its in, using the
 		 * mutex appropriate to establish critical sections. A sleep follows each publication to keep the bus arbitrated
