@@ -622,7 +622,9 @@ public class ModelRunner extends AbstractNodeMain {
 						euler.eulerTime = System.currentTimeMillis();
 						processRole("IMU update:\n"+euler.euler.toJSON(), ChatFormat.Role.USER);
 					} else
-						if(Arrays.compare(euler.euler.getOrientationCovariance(), message.getOrientationCovariance()) != 0) {
+						if(euler.euler.getCompassHeadingDegrees() != message.getCompassHeadingDegrees() ||
+							euler.euler.getRoll() != message.getRoll() ||
+							euler.euler.getPitch() != message.getPitch()) {
 							euler.euler = message;
 							if((System.currentTimeMillis() - euler.eulerTime) >= MESSAGE_THRESHOLD) {
 								euler.eulerTime = System.currentTimeMillis();
