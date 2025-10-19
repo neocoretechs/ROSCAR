@@ -395,7 +395,7 @@ public class ModelRunner extends AbstractNodeMain {
             " --system-prompt \"Answer concisely\"\r\n";
         }
 
-        static Options parseOptions(String[] args) {
+        static Options parseOptions(List<String> args) {
             String prompt = null;
             String systemPrompt = null;
             float temperature = 0.1f;
@@ -407,9 +407,9 @@ public class ModelRunner extends AbstractNodeMain {
             boolean interactive = false;
             boolean preload = false;
             boolean echo = false;
-
-            for (int i = 0; i < args.length; i++) {
-                String optionName = args[i];
+            require(2 < args.size(), "Missing argument for option %s", "all");
+            for (int i = 1; i < args.size(); i++) {
+                String optionName = args.get(i);
                 require(optionName.startsWith("-"), "Invalid option %s", optionName);
                 switch (optionName) {
                     case "--interactive", "--chat", "-i" -> interactive = true;
@@ -425,8 +425,8 @@ public class ModelRunner extends AbstractNodeMain {
                             optionName = parts[0];
                             nextArg = parts[1];
                         } else {
-                            require(i + 1 < args.length, "Missing argument for option %s", optionName);
-                            nextArg = args[i + 1];
+                            require(i + 1 < args.size(), "Missing argument for option %s", optionName);
+                            nextArg = args.get(i + 1);
                             i += 1; // skip arg
                         }
                         switch (optionName) {
@@ -477,7 +477,8 @@ public class ModelRunner extends AbstractNodeMain {
 		// Extract the command line options and parse them into the model options class
 		//
 		List<String> nodeArgs = connectedNode.getNodeConfiguration().getCommandLineLoader().getNodeArguments();
-		options = Options.parseOptions(nodeArgs.toArray(new String[nodeArgs.size()]));
+		//System.out.println("Args:"+Arrays.toString(nodeArgs.toArray(new String[nodeArgs.size()])));
+		options = Options.parseOptions(nodeArgs);
 
 		//
 		// NOTE: dont use options.maxTokens() from here on out after we parse metadata, as the value may be -1 indicating metadata
