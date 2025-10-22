@@ -32,10 +32,10 @@
     <!--<javac compiler="modern" srcdir="${src.dir}" destdir="${build.dir}" >
   		<classpath refid="master-classpath"/>
     </javac>-->
-  	<javac srcdir="${src.dir}" destdir="${build.dir}" source="25" target="25" includeantruntime="false">
+  	<javac srcdir="${src.dir}" destdir="${build.dir}" release="25" includeantruntime="false">
   	  <compilerarg value="--enable-preview"/>
-  	  <compilerarg value="--add-modules"/>
-  	  <compilerarg value="jdk.incubator.vector"/>
+  	  <compilerarg value="--add-modules=jdk.incubator.vector"/>
+
   	  <classpath refid="master-classpath"/>
   	</javac>
 
