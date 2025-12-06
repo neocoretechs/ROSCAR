@@ -77,31 +77,7 @@ final class ArrayFloatTensor extends FloatTensor implements Externalizable, Comp
 	public int compareTo(Object o) {
 		return Arrays.compare(values,((ArrayFloatTensor)o).values);
 	}
-	@Override
-    public FloatSliceView sliceView(int offset, int length) {
-    	// Zero-copy if you store (data, baseOffset, length) in the view
-    	return new ArrayFloatSliceView(values, offset, length);
-    }
-    @Override
-    public float[] exportSlice(float[] dst, int dstOffset, int offset, int length) {
-    	System.arraycopy(values, offset, dst, dstOffset, length);
-       	if(DEBUG)
-    		System.out.println(this.getClass().getName()+".exportSlice dst="+(dst == null ? " arrayCopy dst length="+length+" FAIL, null!": dst.length));
-        return dst;
-    }
-    
-    final class ArrayFloatSliceView implements FloatSliceView {
-    	final float[] data; 
-    	final int base; 
-    	final int len;
-        ArrayFloatSliceView(float[] data, int base, int len) { 
-        	this.data=data; 
-        	this.base=base; 
-        	this.len=len;
-        }
-        public int length() { return len; }
-        public float get(int i) { return data[base + i]; }
-    }
+
 }
 
 

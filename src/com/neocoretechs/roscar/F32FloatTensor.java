@@ -84,26 +84,6 @@ final class F32FloatTensor extends FloatTensor implements Externalizable, Compar
 	}
 	
 	@Override
-	public FloatSliceView sliceView(int offset, int length) {
-		return new F32SliceView(memorySegment, offset, length);
-	}
-	@Override
-	public float[] exportSlice(float[] dst, int dstOffset, int offset, int length) {
-		int i = 0;
-		if (FloatTensor.USE_VECTOR_API) {
-			final int upper = F_SPECIES.loopBound(length);
-			long baseBytes = ((long) offset) * Float.BYTES;
-			for (; i < upper; i += F_SPECIES.length(), baseBytes += (long) F_SPECIES.length() * Float.BYTES) {
-				FloatVector fv = FloatVector.fromMemorySegment(F_SPECIES, memorySegment, baseBytes, ByteOrder.LITTLE_ENDIAN);
-				fv.intoArray(dst, dstOffset + i);
-			}
-		}
-		for (; i < length; i++) {
-			dst[dstOffset + i] = readFloat(memorySegment, ((long) (offset + i)) * Float.BYTES);
-		}
-		return dst;
-	}
-	@Override
 	public FloatTensor fillInPlace(int thisOffset, int size, float value) {
 	    long base = (long) thisOffset * Float.BYTES;
 	    for (int i = 0; i < size; i++) {
@@ -113,22 +93,6 @@ final class F32FloatTensor extends FloatTensor implements Externalizable, Compar
 	    return this;
 	}
 	
-	final class F32SliceView implements FloatSliceView {
-		final MemorySegment seg; 
-		final int base; 
-		final int len;
-		F32SliceView(MemorySegment s, int base, int len){ 
-			seg = s;
-			this.base = base; 
-			this.len = len; 
-		}
-		public int length(){ 
-			return len; 
-		}
-	    public float get(int i) {
-	    	return FloatTensor.readFloat(seg, ((long) (base + i)) * Float.BYTES);
-	    }
-	}
 }
 
 

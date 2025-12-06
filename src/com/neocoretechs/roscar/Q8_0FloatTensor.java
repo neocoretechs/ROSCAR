@@ -64,29 +64,13 @@ final class Q8_0FloatTensor extends FloatTensor implements Externalizable, Compa
 
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
-    	if(FloatTensor.USE_CUDA) {
-    		return cuBLASdot(thisOffset, (ArrayFloatTensor) that, thatOffset, size);
-    	} else
-    		if (FloatTensor.USE_VECTOR_API) {
-    			return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
-    		} else {
-    			return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
-    		}
+    	if (FloatTensor.USE_VECTOR_API) {
+    		return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
+    	} else {
+    		return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
+    	}
     }
     
-    public float cuBLASdot(int thisOffset, FloatTensor that, int thatOffset, int size) {
-    	// 1. Export both slices into float[]
-    	float[] a = this.exportSlice(new float[size], 0, thisOffset, size);
-    	float[] b = that.exportSlice(new float[size], 0, thatOffset, size);
-
-    	// 2. Prepare result buffer
-    	float[] r = new float[1];
-
-    	//int rc = Gemm.sdot(Llama3.cublasHandle, size, a, 1, b, 1, r);
-    	//if (rc != 0) throw new RuntimeException("JNI error " + rc);
-
-    	return r[0];
-    }
     
     private static float vectorDot(Q8_0FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
         float result = 0f;
@@ -177,73 +161,6 @@ final class Q8_0FloatTensor extends FloatTensor implements Externalizable, Compa
 		}
 		return 0;
 	}
-	@Override
-	public FloatSliceView sliceView(int offset, int length) {
-		return new Q8_0SliceView(memorySegment, offset, length);
-	}
-	@Override
-	public float[] exportSlice(float[] dst, int dstOffset, int offset, int length) {
-		// Dequantize block-wise to dst; matches your getFloat math but vectorized
-		final int BS = GGMLType.Q8_0.getBlockSize();     // e.g., 32
-		final int TS = GGMLType.Q8_0.getTypeSize();      // bytes per block
-		int i = 0;
-		// Head: align to block boundary
-		int head = Math.min(length, (-offset) & (BS - 1));
-		for (; i < head; i++) {
-			dst[dstOffset + i] = getFloat(offset + i);
-		}
-		// Middle: block-wise fast path
-		int blockIndex = (offset + i) / BS;
-		int withinOffset = (offset + i) % BS;
-		if (withinOffset != 0) {
-			// Shouldn’t happen because we aligned above, but guard anyway
-			int toBoundary = BS - withinOffset;
-			int bound = Math.min(length - i, toBoundary);
-			for (int k = 0; k < bound; k++) 
-				dst[dstOffset + i + k] = getFloat(offset + i + k);
-			i += bound;
-			blockIndex = (offset + i) / BS;
-		}
-		int remaining = length - i;
-		int fullBlocks = remaining / BS;
-		int tail = remaining % BS;
-		int blockOffsetBytes = blockIndex * TS;
-		for (int b = 0; b < fullBlocks; b++, blockOffsetBytes += TS) {
-			float scale = Float.float16ToFloat(readShort(memorySegment, blockOffsetBytes));
-			// Read BS quant bytes after the scale
-			for (int q = 0; q < BS; q++) {
-				byte quant = readByte(memorySegment, blockOffsetBytes + GGMLType.FLOAT16_BYTES + q);
-				dst[dstOffset + i + q] = quant * scale;
-			}
-			i += BS;
-		}
-		// Tail: remainder
-		for (int t = 0; t < tail; t++) {
-			dst[dstOffset + i + t] = getFloat(offset + i + t);
-		}
-		return dst;
-	}
-	final class Q8_0SliceView implements FloatSliceView {
-		final MemorySegment seg; 
-		final int base; 
-		final int len;
-		Q8_0SliceView(MemorySegment seg, int base, int len) { 
-			this.seg=seg;
-			this.base=base; 
-			this.len=len; 
-		}
-		public int length() { 
-			return len; 
-		}
-		public float get(int i) {
-			int idx = base + i;
-			int blockIndex = idx / GGMLType.Q8_0.getBlockSize();
-			int withinBlockIndex = idx % GGMLType.Q8_0.getBlockSize();
-			int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
-			byte quant = FloatTensor.readByte(seg, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
-			float scale = Float.float16ToFloat(FloatTensor.readShort(seg, blockOffset));
-			return quant * scale;
-		}
-	}
+
 }
 

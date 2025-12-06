@@ -18,7 +18,6 @@ import jdk.incubator.vector.VectorSpecies;
  */
 abstract class FloatTensor implements Externalizable, Comparable {
 	public static boolean DEBUG = false;
-	static final boolean USE_CUDA = false;
     static final int VECTOR_BIT_SIZE = Integer.getInteger("llama.VectorBitSize", VectorShape.preferredShape().vectorBitSize());
     static final boolean USE_VECTOR_API = VECTOR_BIT_SIZE != 0;
 
@@ -225,17 +224,4 @@ abstract class FloatTensor implements Externalizable, Comparable {
     	return sb.toString();
     }
  
-    // Returns a lightweight read-only view (no allocation if possible).
-    public abstract FloatSliceView sliceView(int offset, int length);
-    // Export the slice as contiguous floats into a provided buffer (pooled).
-    // Returns the same dst for chaining.
-    public abstract float[] exportSlice(float[] dst, int dstOffset, int offset, int length);
-    // Convenience: allocate from a pool and export
-    public float[] exportSlicePooled(BufferPool pool, int offset, int length) {
-    	float[] dst = pool.acquire(length);
-    	if(DEBUG)
-    		System.out.println(this.getClass().getName()+".exportSlicePooled dst="+(dst == null ? "pool acquire dst length="+length+" FAIL, null!": dst.length));
-    	exportSlice(dst, 0, offset, length);
-    	return dst;
-    }  
 }

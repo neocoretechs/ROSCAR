@@ -171,65 +171,6 @@ final class Q4_0FloatTensor extends FloatTensor implements Externalizable, Compa
 		return 0;
 	}
 	
-	@Override
-	public float[] exportSlice(float[] dst, int dstOffset, int offset, int length) {
-		final int BS = GGMLType.Q4_0.getBlockSize();   // e.g., 32
-		final int TS = GGMLType.Q4_0.getTypeSize();    // bytes per block
-		int i = 0;
-		// Align head to block boundary
-		int head = Math.min(length, (-offset) & (BS - 1));
-		for (; i < head; i++) 
-			dst[dstOffset + i] = getFloat(offset + i);
-		int blockIndex = (offset + i) / BS;
-		int blockBytes = blockIndex * TS;
-		int remaining = length - i;
-		int fullBlocks = remaining / BS;
-		int tail = remaining % BS;
-		for (int b = 0; b < fullBlocks; b++, blockBytes += TS) {
-			float scale = Float.float16ToFloat(readShort(memorySegment, blockBytes));
-			int base = blockBytes + GGMLType.FLOAT16_BYTES;
-			// First half-block: low nibbles
-			for (int q = 0; q < BS / 2; q++) {
-				byte packed = readByte(memorySegment, base + q);
-				int lo = (packed & 0x0F) - 8;
-				dst[dstOffset + i + q] = lo * scale;
-			}
-			// Second half-block: high nibbles of the same bytes
-			for (int q = 0; q < BS / 2; q++) {
-				byte packed = readByte(memorySegment, base + q);
-				int hi = ((packed >>> 4) & 0x0F) - 8;
-				dst[dstOffset + i + (BS / 2) + q] = hi * scale;
-			}
-			i += BS;
-		}
-		for (int t = 0; t < tail; t++) 
-			dst[dstOffset + i + t] = getFloat(offset + i + t);
-		return dst;
-	}
 	
-	@Override
-	public FloatSliceView sliceView(int offset, int length) {
-	    return new Q4_0SliceView(memorySegment, offset, length);
-	}
-	final class Q4_0SliceView implements FloatSliceView {
-	    final MemorySegment seg; final int base; final int len;
-	    Q4_0SliceView(MemorySegment s, int b, int l){ seg=s; base=b; len=l; }
-	    public int length(){ return len; }
-	    public float get(int i){
-	        int idx = base + i;
-	        int blockIndex = idx / GGMLType.Q4_0.getBlockSize();
-	        int block = blockIndex * GGMLType.Q4_0.getTypeSize();
-	        float scale = Float.float16ToFloat(FloatTensor.readShort(seg, block));
-	        int mod = idx % GGMLType.Q4_0.getBlockSize();
-	        byte packed;
-	        if (mod < GGMLType.Q4_0.getBlockSize() / 2) {
-	            packed = FloatTensor.readByte(seg, block + GGMLType.FLOAT16_BYTES + mod);
-	            return ((packed & 0x0F) - 8) * scale;
-	        } else {
-	            packed = FloatTensor.readByte(seg, block + GGMLType.FLOAT16_BYTES + (mod - GGMLType.Q4_0.getBlockSize() / 2));
-	            return (((packed >>> 4) & 0x0F) - 8) * scale;
-	        }
-	    }
-	}
 }
 
