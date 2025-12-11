@@ -5,7 +5,10 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.List;
 
-import com.neocoretechs.roscar.ChatFormat.Role;
+import com.neocoretechs.roscar.chatformat.ChatFormatInterface;
+import com.neocoretechs.roscar.chatformat.ChatFormat;
+import com.neocoretechs.roscar.chatformat.PromptFrame;
+import com.neocoretechs.roscar.relatrix.RelatrixLSH;
 
 final class ROSCARSystemPrompts {
     public static List<ChatFormat.Message> getSystemMessages() {
@@ -26,7 +29,7 @@ final class ROSCARSystemPrompts {
                 // Parse fields: timestamp | role | prompt | response
                 String[] parts = line.split("\\|");
                 Long ts = Long.parseLong(parts[0].trim());
-                Role role = Role.valueOf(parts[1].trim().toUpperCase());
+                ChatFormat.Role role = ChatFormat.Role.valueOf(parts[1].trim().toUpperCase());
                 String prompt = parts[2].trim();
                 String response = parts[3].trim();
                 ChatFormat.Message cProm = new ChatFormat.Message(role, prompt);

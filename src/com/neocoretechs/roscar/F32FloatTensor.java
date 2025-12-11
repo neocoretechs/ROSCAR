@@ -12,7 +12,7 @@ import java.nio.ByteOrder;
 import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.VectorSpecies;
 
-final class F32FloatTensor extends FloatTensor implements Externalizable, Comparable {
+public final class F32FloatTensor extends FloatTensor implements Externalizable, Comparable {
 	private static final long serialVersionUID = -1L;
 
 	int size;
@@ -26,7 +26,7 @@ final class F32FloatTensor extends FloatTensor implements Externalizable, Compar
 	}
 
 	@Override
-	int size() {
+	public int size() {
 		return size;
 	}
 

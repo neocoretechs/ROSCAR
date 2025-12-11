@@ -28,7 +28,7 @@ final class BF16FloatTensor extends FloatTensor implements Externalizable, Compa
 	}
 
 	@Override
-	int size() {
+	public int size() {
 		return size;
 	}
 

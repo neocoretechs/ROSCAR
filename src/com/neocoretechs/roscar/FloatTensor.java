@@ -16,7 +16,7 @@ import jdk.incubator.vector.VectorSpecies;
  * Not a strict tensor, but rather just a sequence of floats, not required to be backed by memory
  * e.g. can represent a sequence of quantized floats.
  */
-abstract class FloatTensor implements Externalizable, Comparable {
+public abstract class FloatTensor implements Externalizable, Comparable {
 	public static boolean DEBUG = false;
     static final int VECTOR_BIT_SIZE = Integer.getInteger("llama.VectorBitSize", VectorShape.preferredShape().vectorBitSize());
     static final boolean USE_VECTOR_API = VECTOR_BIT_SIZE != 0;
@@ -56,7 +56,7 @@ abstract class FloatTensor implements Externalizable, Comparable {
         }
     }
  
-    abstract int size();
+    public abstract int size();
     abstract float getFloat(int index);
     abstract void setFloat(int index, float value);
     abstract FloatVector getFloatVector(VectorSpecies<Float> species, int offset);
@@ -73,7 +73,7 @@ abstract class FloatTensor implements Externalizable, Comparable {
         }
         return result;
     }
-    float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
+    public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
         return scalarDot(this, thisOffset, that, thatOffset, size);
     }
     void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
@@ -89,7 +89,6 @@ abstract class FloatTensor implements Externalizable, Comparable {
             out[idxArr].setFloat(i, dot(i * dim1, that[idxArr], 0, dim1)); 
         });
     }
-
 
     @FunctionalInterface
     interface AggregateFunction {

@@ -28,7 +28,7 @@ final class F16FloatTensor extends FloatTensor implements Externalizable, Compar
 	}
 
 	@Override
-	int size() {
+	public int size() {
 		return size;
 	}
 

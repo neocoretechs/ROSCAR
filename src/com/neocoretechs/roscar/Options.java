@@ -1,69 +1,81 @@
 package com.neocoretechs.roscar;
 
+import java.io.PrintStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
+		float temperature, float topp, float minp, long seed, int maxTokens, boolean stream, boolean echo, boolean preload,
+		String localNode, String remoteNode, int remotePort) {
 
-public record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
-		float temperature, float topp, long seed, int maxTokens, boolean preload, boolean echo) {
-	private static final Log log = LogFactory.getLog(Options.class);
-	public Options {
+	static final int DEFAULT_MAX_TOKENS = 2048;
+
+	Options {
 		require(modelPath != null, "Missing argument: --model <path> is required");
+		require(interactive || prompt != null, "Missing argument: --prompt is required in --instruct mode e.g. --prompt \"Why is the sky blue?\"");
 		require(0 <= temperature, "Invalid argument: --temperature must be non-negative");
 		require(0 <= topp && topp <= 1, "Invalid argument: --top-p must be within [0, 1]");
 	}
-
-	static final int DEFAULT_MAX_TOKENS = 512;
-
+	
 	static void require(boolean condition, String messageFormat, Object... args) {
 		if (!condition) {
-			log.error("ERROR " + messageFormat.formatted(args));
-			log.info(printUsage());
+			System.out.println("ERROR " + messageFormat.formatted(args));
+			System.out.println();
+			printUsage(System.out);
 			System.exit(-1);
 		}
 	}
 
-	static String printUsage() {
-		return 
-				"Options:\r\n"+
-				"  --model, -m <path>            required, path to .gguf file\r\n"+
-				"  --system-prompt, -sp <string> (optional) system prompt\r\n"+
-				"  --temperature, -temp <float>  temperature in [0,inf], default 0.1\r\n"+
-				"  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95\r\n"+
-				"  --seed <long>                 random seed, default System.nanoTime()\r\n"+
-				"  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS+"\r\n"+
-				"  --echo <boolean>              print ALL tokens to stderr, if true, default false\r\n"+
-				"  --preload <boolean>           use the path to model file with .txt extension as context database preload\r\n"+
-				"  --metadata                    write metadata file of <model file>.metadata\r\n\r\n"+
-				"Examples:\r\n"+
-				" --system-prompt \"Reply concisely, in French\"\r\n"+
-				" --system-prompt \"Answer concisely\"\r\n";
+	static void printUsage(PrintStream out) {
+		out.println("Usage:  java Llama3.java [options]");
+		out.println();
+		out.println("Options:");
+		out.println("  --model, -m <path>            required, path to .gguf file");
+		out.println("  --interactive, --chat, -i     run in chat mode");
+		out.println("  --instruct                    run in instruct (once) mode, default mode");
+		out.println("  --prompt, -p <string>         input prompt");
+		out.println("  --system-prompt, -sp <string> (optional) system prompt");
+		out.println("  --temperature, -temp <float>  temperature in [0,inf], default 0.3");
+		out.println("  --top-p <float>               use top-p unless min-p != 0. p value in top-p (nucleus) sampling in [0,1] default 0.9");
+		out.println("  --min-p <float>               if min-p != 0, use min-p else use top-p. p value in min-p sampling in [0,1] default .05");
+		out.println("  --seed <long>                 random seed, default System.nanoTime()");
+		out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
+		out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
+		out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
+		out.println("  --preload <boolean>           preload context with interactions stored in the database");
+		out.println("  --localNode <string>          local database client node");
+		out.println("  --remoteNode <string>         remote database client node");
+		out.println("  --remotePort <int>            remote database port");
+		out.println();
 	}
 
-	static Options parseOptions(List<String> args) {
+	static Options parseOptions(String[] args) {
 		String prompt = null;
 		String systemPrompt = null;
-		float temperature = 0.1f;
-		float topp = 0.95f;
+		float temperature = 0.3f;
+		float topp = 0.9f;
+		float minp = .05f;
 		Path modelPath = null;
 		long seed = System.nanoTime();
 		// Keep max context length small for low-memory devices.
 		int maxTokens = DEFAULT_MAX_TOKENS;
 		boolean interactive = false;
-		boolean preload = false;
+		boolean stream = true;
 		boolean echo = false;
-		require(2 < args.size(), "Missing argument for option %s", "all");
-		for (int i = 1; i < args.size(); i++) {
-			String optionName = args.get(i);
+		boolean preload = false;
+		String localNode = null;
+		String remoteNode = null;
+		int remotePort = 0;
+
+		for (int i = 0; i < args.length; i++) {
+			String optionName = args[i];
 			require(optionName.startsWith("-"), "Invalid option %s", optionName);
 			switch (optionName) {
 			case "--interactive", "--chat", "-i" -> interactive = true;
 			case "--instruct" -> interactive = false;
 			case "--help", "-h" -> {
-				log.info(printUsage());
+				printUsage(System.out);
 				System.exit(0);
 			}
 			default -> {
@@ -73,26 +85,44 @@ public record Options(Path modelPath, String prompt, String systemPrompt, boolea
 					optionName = parts[0];
 					nextArg = parts[1];
 				} else {
-					require(i + 1 < args.size(), "Missing argument for option %s", optionName);
-					nextArg = args.get(i + 1);
+					require(i + 1 < args.length, "Missing argument for option %s", optionName);
+					nextArg = args[i + 1];
 					i += 1; // skip arg
 				}
 				switch (optionName) {
+				case "--prompt", "-p" -> prompt = nextArg;
 				case "--system-prompt", "-sp" -> systemPrompt = nextArg;
-				case "--temperature", "--temp" -> temperature = Float.parseFloat(nextArg);
+				case "--temperature", "-temp" -> temperature = Float.parseFloat(nextArg);
 				case "--top-p" -> topp = Float.parseFloat(nextArg);
+				case "--min-p" -> minp = Float.parseFloat(nextArg);
 				case "--model", "-m" -> modelPath = Paths.get(nextArg);
 				case "--seed", "-s" -> seed = Long.parseLong(nextArg);
 				case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
+				case "--stream" -> stream = Boolean.parseBoolean(nextArg);
 				case "--echo" -> echo = Boolean.parseBoolean(nextArg);
 				case "--preload" -> preload = Boolean.parseBoolean(nextArg);
-				case "--metadata" -> ModelRunner.DISPLAY_METADATA = Boolean.parseBoolean(nextArg);
+				case "--localNode" -> localNode = nextArg;
+				case "--remoteNode" -> remoteNode = nextArg;
+				case "--remotePort" -> remotePort = Integer.parseInt(nextArg);
 				default -> require(false, "Unknown option: %s", optionName);
 				}
 			}
 			}
 		}
-		return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, preload, echo);
+		return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, minp, seed, maxTokens, stream, echo, preload, localNode, remoteNode, remotePort);
+	}
+	
+	public final int getMaxTokens() {
+		return maxTokens() == -1 ? DEFAULT_MAX_TOKENS : maxTokens();
+	}
+
+	public static Options parseOptions(List<String> nodeArgs) {
+		String[] snodeArgs = new String[nodeArgs.size()];
+		for(int i = 0; i < nodeArgs.size(); i++)
+			snodeArgs[i] = nodeArgs.get(i);
+		return parseOptions(snodeArgs);
 	}
 
 }
+
+
